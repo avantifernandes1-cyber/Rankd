@@ -9317,12 +9317,18 @@ function OrgSetupScreen({ user, onComplete }) {
 // ── ORG DETAIL SCREEN (ralli admin only) ─────────────────────────────────────
 // Full lifecycle: view, edit, manage members, manage invitations.
 function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, onReactivateOrg, onDeleteOrg, onCancelOrg, onUpdateOrg, onUpdateMember, onRemoveMember, onCancelInvite, onResendMemberInvite }) {
-  const [realMembers, setRealMembers]   = useState(null);   // profiles[]
-  const [invitations, setInvitations]   = useState(null);   // all tenant_invitations[]
-  const [localOrg, setLocalOrg]         = useState(org);    // optimistic local copy
-  const [actionLoading, setActionLoading] = useState(null);
-  const [confirmDelete, setConfirmDelete] = useState(false);
-  const [confirmCancel, setConfirmCancel] = useState(false);
+  const [realMembers, setRealMembers]       = useState(null);   // profiles[]
+  const [invitations, setInvitations]       = useState(null);   // all tenant_invitations[]
+  const [tenantSettings, setTenantSettings] = useState(null);   // tenant_settings row
+  const [tenantTeams, setTenantTeams]       = useState([]);     // tenant_teams[]
+  const [localOrg, setLocalOrg]             = useState(org);    // optimistic local copy
+  const [actionLoading, setActionLoading]   = useState(null);
+  const [confirmDelete, setConfirmDelete]   = useState(false);
+  const [confirmCancel, setConfirmCancel]   = useState(false);
+
+  // Feature toggle state
+  const [featureSaving, setFeatureSaving] = useState(false);
+  const [featureError, setFeatureError]   = useState(null);
 
   // Edit org state
   const [showEdit, setShowEdit]       = useState(false);
@@ -9351,13 +9357,17 @@ function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, on
   const refreshData = async () => {
     if (!org.id || org.id.startsWith("org_temp_")) return;
     try {
-      const [{ data: memberData }, { data: invData }] = await Promise.all([
+      const [{ data: memberData }, { data: invData }, { data: settingsData }, { data: teamsData }] = await Promise.all([
         supabase.from("profiles").select("*").eq("tenant_id", org.id).neq("status", "inactive"),
         supabase.rpc("get_tenant_invitations", { p_tenant_id: org.id }),
+        supabase.from("tenant_settings").select("*").eq("tenant_id", org.id).single(),
+        supabase.from("tenant_teams").select("id, name").eq("tenant_id", org.id),
       ]);
       setRealMembers(memberData ?? []);
       const invArr = Array.isArray(invData) ? invData : (typeof invData === "string" ? JSON.parse(invData) : invData ?? []);
       setInvitations(invArr);
+      if (settingsData) setTenantSettings(settingsData);
+      setTenantTeams(teamsData ?? []);
     } catch (err) {
       console.error("[OrgDetailScreen] load failed:", err);
       setRealMembers([]);
@@ -9383,6 +9393,24 @@ function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, on
     } catch (err) {
       console.error("[OrgDetailScreen] resend failed:", err);
       setResendStatus("error");
+    }
+  };
+
+  const handleFeatureToggle = async (featureKey, enabled) => {
+    if (!tenantSettings) return;
+    setFeatureSaving(true);
+    setFeatureError(null);
+    const newFeatures = { ...(tenantSettings.feature_access ?? {}), [featureKey]: enabled };
+    try {
+      const { error } = await supabase.from("tenant_settings")
+        .update({ feature_access: newFeatures })
+        .eq("tenant_id", localOrg.id);
+      if (error) throw error;
+      setTenantSettings(prev => ({ ...prev, feature_access: newFeatures }));
+    } catch (err) {
+      setFeatureError(err?.message ?? "Failed to update feature.");
+    } finally {
+      setFeatureSaving(false);
     }
   };
 
@@ -9686,6 +9714,72 @@ function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, on
         </div>
       )}
 
+      {/* ── Org summary + Features ───────────────────────────── */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+
+        {/* Summary card */}
+        <div style={{ background: C.white, borderRadius: 12, border: `1px solid ${C.border}`, padding: "18px 20px" }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: C.textSub, letterSpacing: "0.05em", marginBottom: 12 }}>ORGANIZATION</div>
+          {[
+            { label: "Status",    value: <span style={{ color: localOrg.status === "active" ? C.green : localOrg.status === "suspended" ? "#ef4444" : C.textSub, fontWeight: 700, textTransform: "capitalize" }}>{localOrg.status}</span> },
+            { label: "Plan",      value: <span style={{ fontWeight: 700, color: C.orange }}>{localOrg.plan}</span> },
+            { label: "Seats",     value: `${members.length} used / ${localOrg.seatLimit ?? localOrg.seats ?? "—"} limit` },
+            { label: "Admin",     value: localOrg.adminEmail ?? "—" },
+            { label: "Domain",    value: localOrg.domain ?? "—" },
+            { label: "Created",   value: localOrg.createdAt ?? "—" },
+          ].map(({ label, value }) => (
+            <div key={label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingBottom: 8, marginBottom: 8, borderBottom: `1px solid ${C.border}` }}>
+              <span style={{ fontSize: 12, color: C.textSub }}>{label}</span>
+              <span style={{ fontSize: 12, color: C.text }}>{value}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Feature access */}
+        <div style={{ background: C.white, borderRadius: 12, border: `1px solid ${C.border}`, padding: "18px 20px" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: C.textSub, letterSpacing: "0.05em" }}>FEATURE ACCESS</div>
+            {featureSaving && <span style={{ fontSize: 11, color: C.textSub }}>Saving…</span>}
+            {featureError && <span style={{ fontSize: 11, color: "#ef4444" }}>{featureError}</span>}
+          </div>
+          {tenantSettings === null ? (
+            <div style={{ fontSize: 12, color: C.textSub }}>Loading…</div>
+          ) : (
+            [
+              { key: "games",           label: "Games (ralli)" },
+              { key: "learn",           label: "Learn & Quizzes" },
+              { key: "battle_cards",    label: "Battle Cards" },
+              { key: "analytics",       label: "Analytics" },
+              { key: "integrations",    label: "Integrations" },
+              { key: "custom_branding", label: "Custom Branding" },
+            ].map(({ key, label }) => {
+              const enabled = !!(tenantSettings.feature_access ?? {})[key];
+              return (
+                <div key={key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                  <span style={{ fontSize: 13, color: C.text }}>{label}</span>
+                  <button
+                    disabled={featureSaving}
+                    onClick={() => handleFeatureToggle(key, !enabled)}
+                    style={{
+                      width: 40, height: 22, borderRadius: 11, border: "none", cursor: featureSaving ? "not-allowed" : "pointer",
+                      background: enabled ? C.orange : C.border, position: "relative", transition: "background 0.15s",
+                    }}
+                  >
+                    <span style={{
+                      position: "absolute", top: 3, left: enabled ? 20 : 3, width: 16, height: 16,
+                      borderRadius: "50%", background: "#fff", transition: "left 0.15s",
+                    }} />
+                  </button>
+                </div>
+              );
+            })
+          )}
+          <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}`, fontSize: 11, color: C.textSub }}>
+            Plan defaults: {localOrg.plan}. Toggle overrides plan defaults per feature.
+          </div>
+        </div>
+      </div>
+
       {/* Admin invite banner */}
       {adminInvite && (
         <div style={{ background: C.white, borderRadius: 12, border: `1px solid ${C.border}`, padding: "16px 20px" }}>
@@ -9781,6 +9875,19 @@ function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, on
           </div>
         )}
 
+        {/* Column headers */}
+        {realMembers !== null && members.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "8px 20px", background: C.pageBg, borderBottom: `1px solid ${C.border}` }}>
+            <div style={{ width: 36, flexShrink: 0 }} />
+            <div style={{ flex: 1, fontSize: 10, fontWeight: 700, color: C.textSub, letterSpacing: "0.05em" }}>MEMBER</div>
+            <div style={{ minWidth: 80, fontSize: 10, fontWeight: 700, color: C.textSub, letterSpacing: "0.05em", textAlign: "right" }}>TEAM</div>
+            <div style={{ minWidth: 68, fontSize: 10, fontWeight: 700, color: C.textSub, letterSpacing: "0.05em" }}>JOINED</div>
+            <div style={{ width: 60, fontSize: 10, fontWeight: 700, color: C.textSub, letterSpacing: "0.05em" }}>ROLE</div>
+            <div style={{ width: 60, fontSize: 10, fontWeight: 700, color: C.textSub, letterSpacing: "0.05em" }}>STATUS</div>
+            <div style={{ width: 110 }} />
+          </div>
+        )}
+
         {/* Members list */}
         {realMembers === null ? (
           <div style={{ padding: 32, textAlign: "center", color: C.textSub, fontSize: 13 }}>Loading members…</div>
@@ -9831,6 +9938,14 @@ function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, on
                     <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{m.name || "—"}</div>
                     <div style={{ fontSize: 11, color: C.textSub }}>{m.email}</div>
                   </div>
+                  {/* Team */}
+                  <span style={{ fontSize: 11, color: C.textSub, minWidth: 80, textAlign: "right" }}>
+                    {tenantTeams.find(t => t.id === m.team_id)?.name ?? <span style={{ color: C.border }}>No team</span>}
+                  </span>
+                  {/* Created */}
+                  <span style={{ fontSize: 11, color: C.textSub, minWidth: 68 }}>
+                    {m.created_at ? new Date(m.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "2-digit" }) : "—"}
+                  </span>
                   <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 6, background: C.orange + "18", color: C.orange }}>{ROLE_LABELS[m.role] ?? m.role}</span>
                   <span style={{ fontSize: 11, padding: "3px 8px", borderRadius: 6, background: m.status === "active" ? C.green + "15" : C.muted, color: m.status === "active" ? C.green : C.textSub, fontWeight: 600 }}>{m.status}</span>
                   <div style={{ display: "flex", gap: 6 }}>
