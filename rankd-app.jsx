@@ -9001,9 +9001,10 @@ function OrgSetupScreen({ user, onComplete }) {
 
   const handleComplete = async () => {
     try {
-      if (user.orgId) {
-        await supabase.from("tenants").update({ status: "active" }).eq("id", user.orgId);
-      }
+      // Direct UPDATE is blocked by RLS (tenants_update_admin = ralli_admin only).
+      // Use complete_onboarding() SECURITY DEFINER RPC instead — scoped to caller's tenant.
+      const { error } = await supabase.rpc("complete_onboarding");
+      if (error) console.error("[OrgSetup] complete_onboarding failed:", error);
     } catch (err) {
       console.error("[OrgSetup] failed to mark tenant active:", err);
     }
