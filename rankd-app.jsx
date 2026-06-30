@@ -20,7 +20,19 @@ import {
   findSessionByPin,
   startGameSession,
   endGameSession,
+  getActiveSessions,
 } from "./src/lib/gameService.js";
+import {
+  getTenantCourses,
+  getTenantLessons,
+  getTenantQuizzes,
+  upsertLesson,
+  upsertCourse,
+  upsertQuiz,
+  deleteQuiz as dbDeleteQuiz,
+  getLessonCompletions,
+  markLessonComplete,
+} from "./src/lib/contentService.js";
 import { getProfile, createMissingProfile, getTenantProfiles } from "./src/lib/profileService.js";
 import { sendInviteEmail } from "./src/lib/emailService.js";
 import { provisionTenant, buildInviteUrl, normalizeProvisionedOrg, createMemberInvite } from "./src/lib/provisioningService.js";
@@ -4709,7 +4721,7 @@ const INITIAL_ASSIGNMENTS = [
 const LESSON_TYPE_ICONS  = { video:"", text:"", image:"", flipcard:"", quiz:"", recording:"", interactive:"" };
 const LESSON_TYPE_COLORS = { video:C.blue, text:C.green, image:C.blue, flipcard:C.purple, quiz:C.purple, recording:C.red, interactive:C.orange };
 
-function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, pendingLessonId, onClearPendingLesson, canCreate = true, canEdit = true, canDelete = true, canAssign = true }) {
+function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, pendingLessonId, onClearPendingLesson, canCreate = true, canEdit = true, canDelete = true, canAssign = true, tenantId = null, isReal = false }) {
   const isAdmin = role === "admin";
   const [tab, setTab]           = useState(isAdmin ? "courses" : "assigned");
   const [courses, setCourses]   = useState(INITIAL_LEARN_COURSES);
@@ -4732,15 +4744,42 @@ function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, p
   const [userTab,    setUserTab]    = useState("assigned");
   const [search,     setSearch]     = useState("");
 
+  // ── Load content from Supabase for real users ────────────────────────────
+  useEffect(() => {
+    if (!isReal || !tenantId) return;
+    Promise.all([
+      getTenantCourses(tenantId),
+      getTenantLessons(tenantId),
+    ]).then(([{ data: dbCourses }, { data: dbLessons }]) => {
+      // Only replace if the tenant actually has content — preserve seed data otherwise
+      if (dbCourses?.length) setCourses(dbCourses);
+      if (dbLessons?.length)  setLessons(dbLessons);
+    });
+  }, [tenantId, isReal]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Load lesson completions from Supabase for real users ─────────────────
+  useEffect(() => {
+    if (!isReal || !user?.id) return;
+    getLessonCompletions(user.id).then(({ data: dbCompleted }) => {
+      if (!dbCompleted) return;
+      setCompletedLessons(prev => new Set([...prev, ...dbCompleted]));
+    });
+  }, [user?.id, isReal]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleCompleteLesson = (id) => {
+    if (completedLessons.has(id)) return;
     setCompletedLessons(prev => {
-      if (prev.has(id)) return prev;
       const next = new Set([...prev, id]);
       try { localStorage.setItem(`ralli_learn_progress_${user?.id ?? "guest"}`, JSON.stringify([...next])); } catch {}
       return next;
     });
     const lessonXp = lessons.find(l => l.id === id)?.xp ?? 0;
-    if (lessonXp && !completedLessons.has(id)) onAwardXp?.(lessonXp);
+    if (lessonXp) onAwardXp?.(lessonXp);
+    // Persist to Supabase for real users (fire-and-forget)
+    if (isReal && user?.id) {
+      markLessonComplete(user.id, id, tenantId ?? null)
+        .then(({ error }) => { if (error) console.error("[ralli] markLessonComplete failed:", error); });
+    }
   };
 
   // Helper: given a lesson and a course, return the next uncompleted lesson in the course
@@ -4765,11 +4804,12 @@ function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, p
   // Production hook: useEffect fires once; pendingLessonId comes from App state.
   useEffect(() => {
     if (pendingLessonId && !isAdmin) {
-      const lesson = INITIAL_LEARN_LESSONS.find(l => l.id === pendingLessonId);
+      const lesson = lessons.find(l => l.id === pendingLessonId)
+        ?? INITIAL_LEARN_LESSONS.find(l => l.id === pendingLessonId);
       if (lesson) openLesson(lesson);
       onClearPendingLesson?.();
     }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pendingLessonId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── USER VIEW ─────────────────────────────────────────────
   if (!isAdmin) {
@@ -5284,16 +5324,32 @@ function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, p
         <CourseBuilderModal
           course={courseModal === "new" ? null : courseModal}
           lessons={lessons}
-          onSave={(c) => {
-            if (courseModal === "new") {
-              setCourses(prev => [...prev, { ...c, id: "lc" + Date.now(), createdAt: "Today" }]);
+          onSave={async (c) => {
+            if (isReal && tenantId) {
+              const { data: saved, error } = await upsertCourse(tenantId, c, user?.id);
+              if (error) console.error("[ralli] upsertCourse failed:", error);
+              const canonical = saved ?? { ...c, id: c.id || "lc" + Date.now() };
+              setCourses(prev => courseModal === "new"
+                ? [...prev, canonical]
+                : prev.map(x => x.id === c.id ? canonical : x));
             } else {
-              setCourses(prev => prev.map(x => x.id === c.id ? c : x));
+              if (courseModal === "new") {
+                setCourses(prev => [...prev, { ...c, id: "lc" + Date.now(), createdAt: "Today" }]);
+              } else {
+                setCourses(prev => prev.map(x => x.id === c.id ? c : x));
+              }
             }
             setCourseModal(null);
           }}
           onClose={() => setCourseModal(null)}
-          onCreateLesson={(newLesson) => {
+          onCreateLesson={async (newLesson) => {
+            if (isReal && tenantId) {
+              const { data: saved, error } = await upsertLesson(tenantId, newLesson, user?.id);
+              if (error) console.error("[ralli] upsertLesson (inline) failed:", error);
+              const withId = saved ?? { ...newLesson, id: "ll" + Date.now() };
+              setLessons(prev => [...prev, withId]);
+              return withId.id;
+            }
             const withId = { ...newLesson, id: "ll" + Date.now() };
             setLessons(prev => [...prev, withId]);
             return withId.id;
@@ -5305,12 +5361,21 @@ function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, p
       {lessonModal && (
         <LessonBuilderModal
           lesson={lessonModal === "new" ? null : (typeof lessonModal === "string" ? null : lessonModal)}
-          onSave={(l) => {
-            const withId = { ...l, id: "ll" + Date.now() };
-            if (!l.id) {
-              setLessons(prev => [...prev, withId]);
+          onSave={async (l) => {
+            if (isReal && tenantId) {
+              const { data: saved, error } = await upsertLesson(tenantId, l, user?.id);
+              if (error) console.error("[ralli] upsertLesson failed:", error);
+              const canonical = saved ?? { ...l, id: l.id || "ll" + Date.now() };
+              setLessons(prev => !l.id || l.id.startsWith("ll")
+                ? [...prev, canonical]
+                : prev.map(x => x.id === l.id ? canonical : x));
             } else {
-              setLessons(prev => prev.map(x => x.id === l.id ? l : x));
+              const withId = { ...l, id: "ll" + Date.now() };
+              if (!l.id) {
+                setLessons(prev => [...prev, withId]);
+              } else {
+                setLessons(prev => prev.map(x => x.id === l.id ? l : x));
+              }
             }
             setLessonModal(null);
           }}
@@ -10120,6 +10185,27 @@ function LoginScreen({ onLogin, users = USERS }) {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  // Forgot password state
+  const [showForgot, setShowForgot]     = useState(false);
+  const [resetEmail, setResetEmail]     = useState("");
+  const [resetSent, setResetSent]       = useState(false);
+  const [resetLoading, setResetLoading] = useState(false);
+  const [resetError, setResetError]     = useState("");
+
+  const handleForgotPw = async (e) => {
+    e.preventDefault();
+    if (!resetEmail.trim()) { setResetError("Enter your email."); return; }
+    setResetLoading(true);
+    setResetError("");
+    const { error: pwErr } = await supabase.auth.resetPasswordForEmail(
+      resetEmail.trim().toLowerCase(),
+      { redirectTo: `${window.location.origin}/reset` }
+    );
+    setResetLoading(false);
+    if (pwErr) { setResetError(pwErr.message); return; }
+    setResetSent(true);
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError("");
@@ -10262,6 +10348,56 @@ function LoginScreen({ onLogin, users = USERS }) {
               {loading ? "Signing in..." : "Sign In →"}
             </button>
           </form>
+
+          {/* Forgot password */}
+          {!showForgot ? (
+            <button
+              onClick={() => { setShowForgot(true); setResetEmail(email); }}
+              style={{
+                marginTop: 12, display: "block", width: "100%", background: "none",
+                border: "none", cursor: "pointer", fontSize: 13, color: C.textSub,
+                textAlign: "center", padding: "4px 0",
+              }}
+            >
+              Forgot password?
+            </button>
+          ) : (
+            <div style={{ marginTop: 14, padding: "16px", borderRadius: 12, background: C.pageBg, border: `1px solid ${C.border}` }}>
+              {resetSent ? (
+                <p style={{ margin: 0, fontSize: 13, color: C.green, fontWeight: 600, textAlign: "center" }}>
+                  Check your email — reset link sent.
+                </p>
+              ) : (
+                <form onSubmit={handleForgotPw} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <p style={{ margin: 0, fontSize: 12, fontWeight: 700, color: C.textSub }}>RESET PASSWORD</p>
+                  <input
+                    type="email"
+                    value={resetEmail}
+                    onChange={e => { setResetEmail(e.target.value); setResetError(""); }}
+                    placeholder="your@email.com"
+                    style={{
+                      width: "100%", padding: "10px 12px", borderRadius: 8, fontSize: 14,
+                      border: `1.5px solid ${resetError ? C.red : C.border}`,
+                      outline: "none", boxSizing: "border-box", color: C.text, background: C.white,
+                    }}
+                  />
+                  {resetError && <p style={{ margin: 0, fontSize: 12, color: C.red }}>{resetError}</p>}
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button
+                      type="button"
+                      onClick={() => setShowForgot(false)}
+                      style={{ flex: 1, padding: "9px", borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.textSub, fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+                    >Cancel</button>
+                    <button
+                      type="submit"
+                      disabled={resetLoading}
+                      style={{ flex: 2, padding: "9px", borderRadius: 8, border: "none", background: C.orange, color: "#fff", fontSize: 13, fontWeight: 700, cursor: resetLoading ? "default" : "pointer", opacity: resetLoading ? 0.7 : 1 }}
+                    >{resetLoading ? "Sending…" : "Send Reset Link"}</button>
+                  </div>
+                </form>
+              )}
+            </div>
+          )}
 
           {/* Test accounts grouped by org */}
           <div style={{ marginTop: 28, borderTop: `1px solid ${C.border}`, paddingTop: 20 }}>
@@ -10865,6 +11001,27 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Load Supabase content for real users on login ──────────────────────────
+  // Fires when a real (Supabase-authenticated) user logs in.
+  // Replaces INITIAL_SESSIONS with their tenant's real sessions.
+  // Replaces localStorage quizzes with their tenant's quizzes from DB.
+  // Demo users keep INITIAL_SESSIONS and localStorage quizzes.
+  useEffect(() => {
+    if (!currentUser?._isReal) return;
+    const tenantId = currentUser.orgId ?? null;
+    if (!tenantId) return;
+
+    // Sessions
+    getActiveSessions(tenantId).then(({ data }) => {
+      if (data) setSessions(data);
+    });
+
+    // Quizzes
+    getTenantQuizzes(tenantId).then(({ data }) => {
+      if (data && data.length > 0) setQuizzes(data);
+    });
+  }, [currentUser?.id, currentUser?._isReal]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // BroadcastChannel — only active when a game is running
   const isInGame = ["rankd-lobby", "rankd-game"].includes(screen);
   const { chPlayers, chAnswers, chMsg, broadcast } = useGameChannel(isInGame ? lobbyPin : null, gameRole);
@@ -11034,7 +11191,13 @@ export default function App() {
   // ── XP award — Production hook: replace with /api/xp/award ──
   const handleAwardXp = (amount) => {
     if (!amount || !currentUser) return;
-    setCurrentUser(prev => prev ? { ...prev, xp: (prev.xp || 0) + amount } : prev);
+    const newXp = (currentUser.xp || 0) + amount;
+    setCurrentUser(prev => prev ? { ...prev, xp: newXp } : prev);
+    // Persist to Supabase for real users (fire-and-forget)
+    if (currentUser._isReal) {
+      supabase.from("profiles").update({ xp: newXp }).eq("id", currentUser.id)
+        .then(({ error }) => { if (error) console.error("[ralli] XP persist failed:", error); });
+    }
   };
 
   const handleSaveProfile = (updated) => {
@@ -11081,7 +11244,24 @@ export default function App() {
   };
 
   // ── Quiz CRUD ──
-  const handleSaveQuiz = (quiz) => {
+  const handleSaveQuiz = async (quiz) => {
+    // For real users, persist to Supabase and get a stable UUID back
+    if (user?._isReal && currentOrg?.id) {
+      const { data: saved, error } = await upsertQuiz(currentOrg.id, quiz, user.id);
+      if (error) console.error("[ralli] upsertQuiz failed:", error);
+      const canonical = saved ?? quiz;
+      setQuizzes(prev => {
+        const updated = prev.find(q => q.id === quiz.id || q.id === canonical.id)
+          ? prev.map(q => (q.id === quiz.id || q.id === canonical.id) ? canonical : q)
+          : [...prev, canonical];
+        try { localStorage.setItem("ralli_quizzes", JSON.stringify(updated)); } catch {}
+        return updated;
+      });
+      setEditingQuiz(null);
+      setScreen("quizzes");
+      return;
+    }
+    // Demo / offline path
     setQuizzes(prev => {
       const updated = prev.find(q => q.id === quiz.id)
         ? prev.map(q => q.id === quiz.id ? quiz : q)
@@ -11103,6 +11283,10 @@ export default function App() {
       try { localStorage.setItem("ralli_quizzes", JSON.stringify(updated)); } catch {}
       return updated;
     });
+    // Fire-and-forget DB delete for real users (only UUIDs are in the DB)
+    if (user?._isReal && id && !id.startsWith("quiz_") && !id.startsWith("sq_")) {
+      dbDeleteQuiz(id).then(({ error }) => { if (error) console.error("[ralli] deleteQuiz failed:", error); });
+    }
   };
 
   const handleToggleFavorite = (id) => {
@@ -11260,7 +11444,7 @@ export default function App() {
       case "rankd-results":     return <RankdResultsScreen onNav={navigate} sessionCode={viewResultsCode} sessions={sessions} gameData={gameResultsData} />;
       case "learn":             return isOrgAdmin && orgUsers.filter(u => u.orgId === user.orgId && u._isReal).length === 0
         ? <OrgAdminEmptyScreen feature="the Learn library" onGoToTeam={() => navigate("team")} />
-        : <LearnScreen role={gameRole} user={user} orgUsers={orgUsers} orgs={orgs} onNav={navigate} onAwardXp={handleAwardXp} pendingLessonId={pendingLessonId} onClearPendingLesson={() => setPendingLessonId(null)} canCreate={perm("actions","create")} canEdit={perm("actions","edit")} canDelete={perm("actions","delete")} canAssign={perm("actions","assign")} />;
+        : <LearnScreen role={gameRole} user={user} orgUsers={orgUsers} orgs={orgs} onNav={navigate} onAwardXp={handleAwardXp} pendingLessonId={pendingLessonId} onClearPendingLesson={() => setPendingLessonId(null)} canCreate={perm("actions","create")} canEdit={perm("actions","edit")} canDelete={perm("actions","delete")} canAssign={perm("actions","assign")} tenantId={currentOrg?.id ?? null} isReal={!!user?._isReal} />;
       case "quizzes":           return isOrgAdmin && orgUsers.filter(u => u.orgId === user.orgId && u._isReal).length === 0
         ? <OrgAdminEmptyScreen feature="quizzes and assignments" onGoToTeam={() => navigate("team")} />
         : <QuizzesScreen role={gameRole} onNav={navigate} quizzes={quizzes} onEditQuiz={handleEditQuiz} onDeleteQuiz={handleDeleteQuiz} onToggleFavorite={handleToggleFavorite} onToggleActive={handleToggleActive} pendingQuizId={pendingQuizId} onClearPendingQuiz={() => setPendingQuizId(null)} canCreate={perm("actions","create")} canEdit={perm("actions","edit")} canDelete={perm("actions","delete")} canLaunch={perm("actions","launch")} />;

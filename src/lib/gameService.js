@@ -179,3 +179,38 @@ export async function getSessionWithResults(sessionId) {
     .single();
   return { data, error };
 }
+
+/**
+ * Fetch active / recent sessions for a tenant.
+ * Used on mount to replace INITIAL_SESSIONS for real users.
+ * Returns sessions normalised to the local state shape.
+ *
+ * @param {string} tenantId
+ * @param {number} [limit=30]
+ * @returns {Promise<{ data: Object[]|null, error: Object|null }>}
+ */
+export async function getActiveSessions(tenantId, limit = 30) {
+  const { data, error } = await supabase
+    .from("game_sessions")
+    .select("*")
+    .eq("tenant_id", tenantId)
+    .in("status", ["waiting", "started", "live", "completed"])
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error || !data) return { data: null, error };
+
+  const normalised = data.map(s => ({
+    code:          s.pin,
+    name:          s.name,
+    quizId:        s.quiz_id,
+    questionCount: s.question_count,
+    status:        s.status,
+    playerCount:   s.player_count ?? 0,
+    demoMode:      s.demo_mode ?? false,
+    players:       [],
+    dbId:          s.id,
+  }));
+
+  return { data: normalised, error: null };
+}
