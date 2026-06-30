@@ -4751,9 +4751,9 @@ function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, p
       getTenantCourses(tenantId),
       getTenantLessons(tenantId),
     ]).then(([{ data: dbCourses }, { data: dbLessons }]) => {
-      // Only replace if the tenant actually has content — preserve seed data otherwise
-      if (dbCourses?.length) setCourses(dbCourses);
-      if (dbLessons?.length)  setLessons(dbLessons);
+      // Real tenants always start blank — replace seed data (empty array if no content yet)
+      setCourses(dbCourses ?? []);
+      setLessons(dbLessons ?? []);
     });
   }, [tenantId, isReal]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -7882,8 +7882,10 @@ const LEADERSHIP_SEED = {
 // Production hook: replace LEADERSHIP_SEED with API fetch on mount.
 // All data shapes mirror the final backend response model.
 // ─────────────────────────────────────────────────────────────
-function LeadershipDashboardScreen({ currentOrg, orgUsers = [] }) {
-  const data           = LEADERSHIP_SEED; // swap for API data
+function LeadershipDashboardScreen({ currentOrg, orgUsers = [], isReal = false }) {
+  const realMembers = orgUsers.filter(u => u._isReal);
+  const hasRealData = !isReal || realMembers.length > 0;
+  const data        = LEADERSHIP_SEED; // swap for API data
   const [trendPeriod,  setTrendPeriod]  = useState("weekly");
   const [peopleFilter, setPeopleFilter] = useState("all"); // all | top | improved | promotion | coaching
   const [teamFilter,   setTeamFilter]   = useState("all"); // all | team id
@@ -7946,6 +7948,37 @@ function LeadershipDashboardScreen({ currentOrg, orgUsers = [] }) {
     { key: "ent",     label: "Enterprise",   color: C.red },
     { key: "bdr",     label: "BDR / SDR",    color: C.blue },
   ];
+
+  if (!hasRealData) {
+    const emptyCard = (icon, title, sub) => (
+      <div style={{ background: C.white, borderRadius: 12, border: `1px solid ${C.border}`, padding: "24px 20px", display: "flex", flexDirection: "column", gap: 8 }}>
+        <div style={{ fontSize: 22 }}>{icon}</div>
+        <div style={{ fontSize: 14, fontWeight: 800, color: C.text }}>{title}</div>
+        <div style={{ fontSize: 12, color: C.textSub, lineHeight: 1.5 }}>{sub}</div>
+      </div>
+    );
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: C.text }}>Dashboard</h2>
+          <p style={{ margin: "4px 0 0", fontSize: 13, color: C.textSub }}>
+            Team performance and learning progress{currentOrg ? ` · ${currentOrg.name}` : ""}
+          </p>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16 }}>
+          {emptyCard("", "Team Performance", "Readiness scores appear once your team starts completing lessons and quizzes.")}
+          {emptyCard("", "Assignments", "Assign courses and quizzes to see completion progress here.")}
+          {emptyCard("", "Learning Progress", "Lesson and course completion data will appear as your team engages with content.")}
+          {emptyCard("", "Quiz Scores", "Quiz performance and averages will show once reps start taking quizzes.")}
+        </div>
+        <div style={{ background: C.white, borderRadius: 12, border: `1px solid ${C.border}`, padding: "32px 24px", textAlign: "center" }}>
+          <div style={{ fontSize: 13, color: C.textSub, lineHeight: 1.6 }}>
+            Invite your first team members to get started. Data populates automatically as they complete content.
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
@@ -11024,6 +11057,35 @@ function LoginScreen({ onLogin, users = USERS }) {
   );
 }
 
+// ── OrgAdminSettingsScreen ────────────────────────────────────────────────────
+// Tabbed settings for Organization Admin: Role Access + Team Settings
+// ─────────────────────────────────────────────────────────────────────────────
+function OrgAdminSettingsScreen({ rolePermissions, onSaveRolePermissions, currentOrg, orgId, orgName, orgUsers, onAddUser }) {
+  const [tab, setTab] = useState("roles"); // "roles" | "team"
+  const tabs = [
+    { id: "roles", label: "Role Access" },
+    { id: "team",  label: "Team Settings" },
+  ];
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {/* Tab bar */}
+      <div style={{ display: "flex", gap: 4, borderBottom: `1px solid ${C.border}`, paddingBottom: 0 }}>
+        {tabs.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={{
+            padding: "8px 16px", border: "none", cursor: "pointer", background: "none",
+            fontSize: 13, fontWeight: 700,
+            color: tab === t.id ? C.orange : C.textSub,
+            borderBottom: `2px solid ${tab === t.id ? C.orange : "transparent"}`,
+            marginBottom: -1,
+          }}>{t.label}</button>
+        ))}
+      </div>
+      {tab === "roles" && <RoleAccessScreen rolePermissions={rolePermissions} onSave={onSaveRolePermissions} currentOrg={currentOrg} />}
+      {tab === "team"  && <TeamScreen orgId={orgId} orgName={orgName} orgUsers={orgUsers} onAddUser={onAddUser} />}
+    </div>
+  );
+}
+
 // ── APP SHELL ──────────────────────────────────────────────
 
 // ── SEED DATA ─────────────────────────────────────────────────────────────────
@@ -11584,9 +11646,9 @@ export default function App() {
       if (data) setSessions(data);
     });
 
-    // Quizzes
+    // Quizzes — real tenants always start blank
     getTenantQuizzes(tenantId).then(({ data }) => {
-      if (data && data.length > 0) setQuizzes(data);
+      setQuizzes(data ?? []);
     });
 
     // Battle cards — real orgs start blank; use tenant-scoped localStorage keys
@@ -12059,11 +12121,9 @@ export default function App() {
         setScreen("team");
       }} />;
       case "home":              return isOrgAdmin
-        ? <TeamScreen orgId={user.orgId} orgName={currentOrg?.name ?? "Your Team"} orgUsers={orgUsers} onAddUser={handleAddUser} />
+        ? <LeadershipDashboardScreen currentOrg={currentOrg} orgUsers={orgUsers} isReal={!!user?._isReal} />
         : <HomeScreen user={user} onNav={navigate} quizAssignments={USER_QUIZ_ASSIGNMENTS_SEED} onResumeLesson={(id) => { setPendingLessonId(id); navigate("learn"); }} onStartQuiz={(id) => { setPendingQuizId(id); navigate("quizzes"); }} />;
-      case "rankd":             return isOrgAdmin && orgUsers.filter(u => u.orgId === user.orgId && u._isReal).length === 0
-        ? <OrgAdminEmptyScreen feature="live game sessions" onGoToTeam={() => navigate("team")} />
-        : <RankdScreen onNav={navigate} onJoin={handleEnterPin} sessions={sessions} onLaunch={handleLaunch} onViewResults={handleViewResults} onRelaunch={handleRelaunch} role={gameRole} />;
+      case "rankd":             return <RankdScreen onNav={navigate} onJoin={handleEnterPin} sessions={sessions} onLaunch={handleLaunch} onViewResults={handleViewResults} onRelaunch={handleRelaunch} role={gameRole} />;
       case "rankd-new":         return <NewSessionScreen onNav={navigate} quizzes={quizzes} onCreateSession={handleCreateSession} />;
       case "rankd-quiz-builder":return <QuizBuilderScreen onNav={navigate} onSave={handleSaveQuiz} initialQuiz={editingQuiz} onEditQuiz={handleEditQuiz} />;
       case "rankd-name-entry":  return <RankdNameEntryScreen onNav={navigate} pin={lobbyPin} sessionName={lobbySessionName} onConfirm={handleEnterName} defaultName={userProfile.nickname?.trim() || user?.name || ""} defaultAvatar={userProfile.avatarEmoji} />;
@@ -12087,7 +12147,7 @@ export default function App() {
       case "team":              return <TeamScreen orgId={user.orgId} orgName={currentOrg?.name ?? "Your Team"} orgUsers={orgUsers} onAddUser={handleAddUser} />;
       case "settings":
         if (isSuperAdmin)  return <RoleAccessScreen rolePermissions={rolePermissions} onSave={handleSaveRolePermissions} currentOrg={currentOrg} />;
-        if (isOrgAdmin)    return <RoleAccessScreen rolePermissions={rolePermissions} onSave={handleSaveRolePermissions} currentOrg={currentOrg} />;
+        if (isOrgAdmin)    return <OrgAdminSettingsScreen rolePermissions={rolePermissions} onSaveRolePermissions={handleSaveRolePermissions} currentOrg={currentOrg} orgId={user.orgId} orgName={currentOrg?.name ?? "Your Team"} orgUsers={orgUsers} onAddUser={handleAddUser} />;
         return <UserSettingsScreen user={user} profile={userProfile} notifPrefs={notifPrefs} onSaveProfile={handleSaveProfile} onSaveNotifs={handleSaveNotifs} currentOrg={currentOrg} />;
       default:                  return <HomeScreen user={user} />;
     }
@@ -12156,8 +12216,7 @@ export default function App() {
                   (!item.featureKey || canAccess(item.featureKey, userPlan)) &&
                   perm("features", item.permKey ?? item.id)
                 ),
-                // Org admin gets a Team item (no feature gate — always visible to managers)
-                ...(isOrgAdmin ? [{ id: "team", label: "Team", icon: "" }] : []),
+                // Team is managed inside Settings for org admins
               ]),
             ].map(item => {
               const active = screen === item.id || (screen.startsWith("rankd-") && item.id === "rankd");
@@ -12174,7 +12233,7 @@ export default function App() {
                 }}>
                   {item.icon && <span style={{ fontSize: 15, opacity: active ? 1 : 0.7 }}>{item.icon}</span>}
                   <span style={{ flex: 1 }}>{isAdminType && item.adminLabel ? item.adminLabel : item.label}</span>
-                  {item.badge && (
+                  {item.badge && !(user?._isReal && item.id === "leaderboard") && (
                     <span style={{
                       fontSize: 10, fontWeight: 800, padding: "2px 6px", borderRadius: 10,
                       background: item.badge === "LIVE" ? "#22C55E" : C.orange,
