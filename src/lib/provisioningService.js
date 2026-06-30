@@ -211,10 +211,11 @@ export async function advanceOnboardingStep(token, completedStep) {
  * @param {'user'|'manager'|'orgAdmin'} [role='user']
  * @returns {Promise<{ invitationId, token, email, role, tenantId, expiresAt, inviteUrl }>}
  */
-export async function createMemberInvite(email, role = "user") {
+export async function createMemberInvite(email, role = "user", teamId = null) {
   const { data, error } = await supabase.rpc("create_member_invite", {
-    p_email: email.trim().toLowerCase(),
-    p_role:  role,
+    p_email:   email.trim().toLowerCase(),
+    p_role:    role,
+    p_team_id: teamId ?? null,
   });
 
   if (error) throw error;

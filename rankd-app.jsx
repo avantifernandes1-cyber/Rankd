@@ -8449,9 +8449,28 @@ const fullLeaderboard = [
   { rank: 8, initials: "CR", name: "Carlos Reyes", title: "SDR", score: 74, weeklyXp: 610, streak: 2, color: "#14B8A6" },
 ];
 
-function LeaderboardScreen({ currentUser }) {
+function LeaderboardScreen({ currentUser, isReal = false }) {
   const [period, setPeriod] = useState("week");
   const leaderboard = fullLeaderboard.map(p => ({ ...p, isMe: p.name === currentUser?.name }));
+
+  // Real tenants start with no activity — show empty state until data exists
+  if (isReal) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: C.text }}>Leaderboard</h2>
+          <p style={{ margin: "4px 0 0", fontSize: 13, color: C.textSub }}>Team rankings based on knowledge score</p>
+        </div>
+        <div style={{ background: C.white, borderRadius: 12, border: `1px solid ${C.border}`, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "60px 40px", textAlign: "center", gap: 12 }}>
+          <div style={{ width: 56, height: 56, borderRadius: 14, background: C.orangeLight, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 }}>🏆</div>
+          <div style={{ fontSize: 16, fontWeight: 800, color: C.text }}>No rankings yet</div>
+          <p style={{ margin: 0, fontSize: 13, color: C.textSub, maxWidth: 300, lineHeight: 1.6 }}>
+            Rankings appear once your team members start completing lessons and quizzes. Invite your first reps to get started.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -9930,26 +9949,36 @@ function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, on
 // ── TEAM SCREEN (org admin manages their users) ────────────
 function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
   const members = orgUsers.filter(u => u.orgId === orgId);
+
+  // ── Invite modal state ─────────────────────────────────────────────────────
   const [showAdd, setShowAdd]     = useState(false);
-  const [form, setForm]           = useState({ email: "", role: "user" });
+  const [form, setForm]           = useState({ email: "", role: "user", teamId: "" });
   const [submitted, setSubmitted] = useState(false);
   const [inviteUrl, setInviteUrl] = useState(null);
   const [inviteLoading, setInviteLoading] = useState(false);
   const [inviteError, setInviteError]     = useState(null);
 
-  // Persistent invite list
-  const [invitations, setInvitations]     = useState(null); // null = loading
+  // ── Invitation list ────────────────────────────────────────────────────────
+  const [invitations, setInvitations]           = useState(null); // null = loading
   const [invActionLoading, setInvActionLoading] = useState(null);
-  const [showHistory, setShowHistory]     = useState(false);
+  const [showHistory, setShowHistory]           = useState(false);
 
-  // ── Team management ────────────────────────────────────────────────────────
-  const [teams, setTeams]               = useState(null); // null = loading
+  // ── Teams state ────────────────────────────────────────────────────────────
+  const [teams, setTeams]               = useState(null);
   const [showCreateTeam, setShowCreateTeam] = useState(false);
   const [teamName, setTeamName]         = useState("");
   const [teamSaving, setTeamSaving]     = useState(false);
   const [teamError, setTeamError]       = useState(null);
-  const [editTeam, setEditTeam]         = useState(null); // { id, name } being edited
+  const [editTeam, setEditTeam]         = useState(null);
   const [editTeamName, setEditTeamName] = useState("");
+
+  // ── Team detail state ──────────────────────────────────────────────────────
+  const [selectedTeam, setSelectedTeam]       = useState(null); // team row object
+  const [teamMembers, setTeamMembers]         = useState(null); // null = loading
+  const [allTenantMembers, setAllTenantMembers] = useState([]); // full tenant profiles
+  const [addMemberId, setAddMemberId]         = useState("");   // selected profile id to add
+  const [memberAssigning, setMemberAssigning] = useState(false);
+  const [memberRemoving, setMemberRemoving]   = useState(null);  // profile id being removed
 
   const loadTeams = async () => {
     if (!orgId) return;
@@ -9958,6 +9987,48 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
   };
 
   useEffect(() => { loadTeams(); }, [orgId]); // eslint-disable-line
+
+  // Load team members + all tenant profiles when a team is selected
+  const openTeamDetail = async (team) => {
+    setSelectedTeam(team);
+    setTeamMembers(null);
+    setAddMemberId("");
+
+    const [{ data: inTeam }, { data: all }] = await Promise.all([
+      supabase.from("profiles").select("id, name, email, role, color, team_id").eq("team_id", team.id),
+      supabase.from("profiles").select("id, name, email, role, color, team_id").eq("tenant_id", orgId),
+    ]);
+    setTeamMembers(inTeam ?? []);
+    setAllTenantMembers(all ?? []);
+  };
+
+  const handleAssignMember = async () => {
+    if (!addMemberId || !selectedTeam) return;
+    setMemberAssigning(true);
+    try {
+      await supabase.rpc("assign_member_team", { p_user_id: addMemberId, p_team_id: selectedTeam.id });
+      // Refresh
+      const { data } = await supabase.from("profiles").select("id, name, email, role, color, team_id").eq("team_id", selectedTeam.id);
+      setTeamMembers(data ?? []);
+      const { data: all } = await supabase.from("profiles").select("id, name, email, role, color, team_id").eq("tenant_id", orgId);
+      setAllTenantMembers(all ?? []);
+      setAddMemberId("");
+    } catch (err) {
+      alert(err?.message ?? "Failed to add member to team.");
+    } finally { setMemberAssigning(false); }
+  };
+
+  const handleRemoveMember = async (profileId) => {
+    setMemberRemoving(profileId);
+    try {
+      await supabase.rpc("assign_member_team", { p_user_id: profileId, p_team_id: null });
+      setTeamMembers(prev => (prev ?? []).filter(m => m.id !== profileId));
+      const { data: all } = await supabase.from("profiles").select("id, name, email, role, color, team_id").eq("tenant_id", orgId);
+      setAllTenantMembers(all ?? []);
+    } catch (err) {
+      alert(err?.message ?? "Failed to remove member from team.");
+    } finally { setMemberRemoving(null); }
+  };
 
   const handleCreateTeam = async (e) => {
     e.preventDefault();
@@ -9984,6 +10055,8 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
       if (error) throw error;
       setEditTeam(null); setEditTeamName("");
       await loadTeams();
+      // Keep selectedTeam name in sync if we're in detail view
+      if (selectedTeam?.id === editTeam.id) setSelectedTeam(t => ({ ...t, name }));
     } catch (err) {
       alert(err.message ?? "Failed to update team.");
     } finally { setTeamSaving(false); }
@@ -9994,6 +10067,7 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
     try {
       const { error } = await supabase.from("tenant_teams").delete().eq("id", team.id);
       if (error) throw error;
+      if (selectedTeam?.id === team.id) setSelectedTeam(null);
       await loadTeams();
     } catch (err) {
       alert(err.message ?? "Failed to delete team.");
@@ -10012,11 +10086,11 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
     }
   };
 
-  useEffect(() => { if (orgId) refreshInvitations(); }, [orgId]);
+  useEffect(() => { if (orgId) refreshInvitations(); }, [orgId]); // eslint-disable-line
 
   const resetModal = () => {
     setShowAdd(false); setSubmitted(false); setInviteUrl(null);
-    setInviteError(null); setForm({ email: "", role: "user" });
+    setInviteError(null); setForm({ email: "", role: "user", teamId: "" });
   };
 
   const handleAdd = async (e) => {
@@ -10024,12 +10098,11 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
     setInviteLoading(true);
     setInviteError(null);
     try {
-      const result = await createMemberInvite(form.email.trim(), form.role);
+      const result = await createMemberInvite(form.email.trim(), form.role, form.teamId || null);
       setInviteUrl(result.inviteUrl);
       setSubmitted(true);
       onMemberInvited?.();
       refreshInvitations();
-      // Fire invite email — non-blocking, invite URL is always the fallback
       sendInviteEmail({ to: form.email.trim(), orgName, inviteUrl: result.inviteUrl, type: "member", role: form.role })
         .catch(err => console.warn("[ralli] Member invite email failed:", err.message));
     } catch (err) {
@@ -10058,7 +10131,6 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
       if (error) throw error;
       const freshToken = data?.token ?? inv.token;
       setInvitations(prev => prev.map(i => i.id === inv.id ? { ...i, status: "pending", token: freshToken } : i));
-      // Fire email with refreshed token — non-blocking
       sendInviteEmail({ to: inv.email, orgName, inviteUrl: buildInviteUrl(freshToken), type: "member", role: inv.role })
         .catch(err => console.warn("[ralli] Resend invite email failed:", err.message));
     } catch (err) {
@@ -10068,12 +10140,88 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
     }
   };
 
-  const pendingInvites  = (invitations ?? []).filter(i => !["accepted","canceled"].includes(i.status));
-  const historyInvites  = (invitations ?? []).filter(i =>  ["accepted","canceled"].includes(i.status));
+  const pendingInvites = (invitations ?? []).filter(i => !["accepted","canceled"].includes(i.status));
+  const historyInvites = (invitations ?? []).filter(i =>  ["accepted","canceled"].includes(i.status));
 
-  const roleColors = { user: C.orange, orgAdmin: C.green, superadmin: C.purple };
-  const roleLabels = { user: "Rep", orgAdmin: "Manager", superadmin: "Super Admin" };
+  const ROLE_COLORS = { user: C.orange, orgAdmin: C.green, superadmin: C.purple };
+  const ROLE_LABELS = { user: "Rep", orgAdmin: "Manager", superadmin: "Super Admin" };
 
+  // ── Team detail view ────────────────────────────────────────────────────────
+  if (selectedTeam) {
+    const unassigned = allTenantMembers.filter(m => !m.team_id || m.team_id !== selectedTeam.id);
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+        {/* Header */}
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <button onClick={() => setSelectedTeam(null)}
+            style={{ padding: "7px 14px", borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.text, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+            ← Back
+          </button>
+          <div>
+            <h2 style={{ margin: 0, fontSize: 20, fontWeight: 800, color: C.text }}>{selectedTeam.name}</h2>
+            {selectedTeam.is_default && <div style={{ fontSize: 12, color: C.textSub }}>Default team</div>}
+          </div>
+        </div>
+
+        {/* Members in this team */}
+        <div style={{ background: C.white, borderRadius: 12, border: `1px solid ${C.border}`, overflow: "hidden" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 20px", borderBottom: `1px solid ${C.border}` }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>
+              Members {teamMembers !== null ? `(${teamMembers.length})` : ""}
+            </div>
+          </div>
+
+          {/* Add member to team */}
+          {unassigned.length > 0 && (
+            <div style={{ padding: "12px 20px", borderBottom: `1px solid ${C.border}`, background: C.pageBg, display: "flex", gap: 8, alignItems: "center" }}>
+              <select value={addMemberId} onChange={e => setAddMemberId(e.target.value)}
+                style={{ flex: 1, padding: "8px 10px", borderRadius: 8, border: `1.5px solid ${C.border}`, fontSize: 13, color: C.text, background: C.white, outline: "none" }}>
+                <option value="">Select a member to add…</option>
+                {unassigned.map(m => (
+                  <option key={m.id} value={m.id}>{m.name} ({ROLE_LABELS[m.role] ?? m.role})</option>
+                ))}
+              </select>
+              <button onClick={handleAssignMember} disabled={!addMemberId || memberAssigning}
+                style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: C.orange, color: "#fff", fontSize: 12, fontWeight: 700, cursor: !addMemberId || memberAssigning ? "not-allowed" : "pointer", opacity: !addMemberId || memberAssigning ? 0.6 : 1, whiteSpace: "nowrap" }}>
+                {memberAssigning ? "Adding…" : "Add to Team"}
+              </button>
+            </div>
+          )}
+
+          {teamMembers === null && (
+            <div style={{ padding: 24, textAlign: "center", color: C.textMuted, fontSize: 13 }}>Loading…</div>
+          )}
+          {teamMembers !== null && teamMembers.length === 0 && (
+            <div style={{ padding: "32px 20px", textAlign: "center", color: C.textMuted, fontSize: 13 }}>
+              No members in this team yet.{unassigned.length > 0 ? " Use the selector above to add someone." : ""}
+            </div>
+          )}
+          {(teamMembers ?? []).map((m, i) => {
+            const initials = m.name?.split(" ").map(n => n[0]).join("").slice(0, 2).toUpperCase() ?? "?";
+            const isRemoving = memberRemoving === m.id;
+            return (
+              <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "13px 20px", borderBottom: i < teamMembers.length - 1 ? `1px solid ${C.border}` : "none" }}>
+                <div style={{ width: 36, height: 36, borderRadius: "50%", background: m.color ?? C.orange, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, color: "#fff", flexShrink: 0 }}>{initials}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{m.name}</div>
+                  <div style={{ fontSize: 11, color: C.textSub }}>{m.email}</div>
+                </div>
+                <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 6, background: (ROLE_COLORS[m.role] ?? C.textMuted) + "18", color: ROLE_COLORS[m.role] ?? C.textMuted }}>
+                  {ROLE_LABELS[m.role] ?? m.role}
+                </span>
+                <button onClick={() => handleRemoveMember(m.id)} disabled={isRemoving}
+                  style={{ padding: "5px 10px", borderRadius: 7, border: "1px solid #fca5a5", background: "#fef2f2", color: "#ef4444", fontSize: 11, fontWeight: 600, cursor: isRemoving ? "not-allowed" : "pointer", opacity: isRemoving ? 0.6 : 1 }}>
+                  {isRemoving ? "…" : "Remove"}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Team list view (default) ────────────────────────────────────────────────
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -10085,7 +10233,7 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
           onClick={() => setShowAdd(true)}
           style={{ padding: "10px 18px", borderRadius: 10, border: "none", cursor: "pointer", background: C.orange, color: "#fff", fontSize: 13, fontWeight: 700 }}
         >
-          + Add Member
+          + Invite Member
         </button>
       </div>
 
@@ -10104,13 +10252,9 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
         {showCreateTeam && (
           <form onSubmit={handleCreateTeam} style={{ padding: "12px 20px", borderBottom: `1px solid ${C.border}`, background: C.pageBg, display: "flex", gap: 8, alignItems: "flex-start", flexDirection: "column" }}>
             <div style={{ display: "flex", gap: 8, width: "100%" }}>
-              <input
-                autoFocus
-                value={teamName}
-                onChange={e => setTeamName(e.target.value)}
+              <input autoFocus value={teamName} onChange={e => setTeamName(e.target.value)}
                 placeholder="e.g. SDR, AE, US SDR, APAC AE"
-                style={{ flex: 1, padding: "8px 10px", borderRadius: 8, border: `1.5px solid ${teamError ? "#ef4444" : C.border}`, fontSize: 13, outline: "none", color: C.text }}
-              />
+                style={{ flex: 1, padding: "8px 10px", borderRadius: 8, border: `1.5px solid ${teamError ? "#ef4444" : C.border}`, fontSize: 13, outline: "none", color: C.text }} />
               <button type="submit" disabled={teamSaving}
                 style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: C.orange, color: "#fff", fontSize: 12, fontWeight: 700, cursor: teamSaving ? "not-allowed" : "pointer", opacity: teamSaving ? 0.7 : 1, whiteSpace: "nowrap" }}>
                 {teamSaving ? "Creating…" : "Create"}
@@ -10120,10 +10264,7 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
           </form>
         )}
 
-        {teams === null && (
-          <div style={{ padding: 20, textAlign: "center", color: C.textMuted, fontSize: 13 }}>Loading…</div>
-        )}
-
+        {teams === null && <div style={{ padding: 20, textAlign: "center", color: C.textMuted, fontSize: 13 }}>Loading…</div>}
         {teams !== null && teams.length === 0 && !showCreateTeam && (
           <div style={{ padding: "24px 20px", textAlign: "center", color: C.textMuted, fontSize: 13 }}>
             No teams yet. Create one to organize your members.
@@ -10134,12 +10275,8 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
           <div key={team.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 20px", borderBottom: i < (teams.length - 1) ? `1px solid ${C.border}` : "none" }}>
             {editTeam?.id === team.id ? (
               <form onSubmit={handleUpdateTeam} style={{ flex: 1, display: "flex", gap: 8 }}>
-                <input
-                  autoFocus
-                  value={editTeamName}
-                  onChange={e => setEditTeamName(e.target.value)}
-                  style={{ flex: 1, padding: "6px 10px", borderRadius: 7, border: `1.5px solid ${C.orange}`, fontSize: 13, outline: "none", color: C.text }}
-                />
+                <input autoFocus value={editTeamName} onChange={e => setEditTeamName(e.target.value)}
+                  style={{ flex: 1, padding: "6px 10px", borderRadius: 7, border: `1.5px solid ${C.orange}`, fontSize: 13, outline: "none", color: C.text }} />
                 <button type="submit" disabled={teamSaving}
                   style={{ padding: "6px 12px", borderRadius: 7, border: "none", background: C.orange, color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
                   {teamSaving ? "…" : "Save"}
@@ -10151,12 +10288,13 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
               </form>
             ) : (
               <>
-                <div style={{ flex: 1, minWidth: 0 }}>
+                {/* Clickable team name — opens detail view */}
+                <button onClick={() => openTeamDetail(team)}
+                  style={{ flex: 1, background: "none", border: "none", padding: 0, textAlign: "left", cursor: "pointer" }}>
                   <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{team.name}</div>
-                  {team.is_default && (
-                    <div style={{ fontSize: 11, color: C.textMuted }}>Default team</div>
-                  )}
-                </div>
+                  {team.is_default && <div style={{ fontSize: 11, color: C.textMuted }}>Default team · click to manage members</div>}
+                  {!team.is_default && <div style={{ fontSize: 11, color: C.textSub }}>Click to manage members</div>}
+                </button>
                 <div style={{ display: "flex", gap: 6 }}>
                   <button onClick={() => { setEditTeam(team); setEditTeamName(team.name); }}
                     style={{ padding: "5px 10px", borderRadius: 7, border: `1px solid ${C.border}`, background: C.white, color: C.text, fontSize: 11, fontWeight: 600, cursor: "pointer" }}>
@@ -10177,31 +10315,22 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
 
       {/* Members list */}
       <div style={{ background: C.white, borderRadius: 12, border: `1px solid ${C.border}`, overflow: "hidden" }}>
+        <div style={{ padding: "14px 20px", borderBottom: members.length ? `1px solid ${C.border}` : "none" }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>Members</div>
+        </div>
         {members.length === 0 && (
-          <div style={{ padding: 40, textAlign: "center", color: C.textMuted, fontSize: 14 }}>No members yet. Add your first team member.</div>
+          <div style={{ padding: 40, textAlign: "center", color: C.textMuted, fontSize: 14 }}>No members yet. Invite your first rep.</div>
         )}
         {members.map((u, i) => (
-          <div key={u.id} style={{
-            display: "flex", alignItems: "center", gap: 14, padding: "14px 20px",
-            borderBottom: i < members.length - 1 ? `1px solid ${C.border}` : "none",
-          }}>
-            <div style={{
-              width: 38, height: 38, borderRadius: "50%", background: u.color,
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 13, fontWeight: 800, color: "#fff", flexShrink: 0,
-            }}>{u.initials}</div>
+          <div key={u.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "14px 20px", borderBottom: i < members.length - 1 ? `1px solid ${C.border}` : "none" }}>
+            <div style={{ width: 38, height: 38, borderRadius: "50%", background: u.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 800, color: "#fff", flexShrink: 0 }}>{u.initials}</div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{u.name}</div>
               <div style={{ fontSize: 12, color: C.textSub, marginTop: 1 }}>{u.email}{u.title ? ` · ${u.title}` : ""}</div>
             </div>
-            <span style={{
-              fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 6,
-              background: (roleColors[u.role] ?? C.textMuted) + "18",
-              color: roleColors[u.role] ?? C.textMuted,
-            }}>{roleLabels[u.role] ?? u.role}</span>
-            {u.score !== null && u.score !== undefined && (
-              <span style={{ fontSize: 12, color: C.textSub }}>Score: <b style={{ color: C.text }}>{u.score}</b></span>
-            )}
+            <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 6, background: (ROLE_COLORS[u.role] ?? C.textMuted) + "18", color: ROLE_COLORS[u.role] ?? C.textMuted }}>
+              {ROLE_LABELS[u.role] ?? u.role}
+            </span>
           </div>
         ))}
       </div>
@@ -10217,13 +10346,15 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
             const url = buildInviteUrl(inv.token);
             const isCanceling = invActionLoading === "cancel_" + inv.id;
             const isResending = invActionLoading === "resend_" + inv.id;
-            const ROLE_LABELS = { user: "Rep", orgAdmin: "Manager", superadmin: "Super Admin" };
+            const teamName_ = inv.team_id ? (teams ?? []).find(t => t.id === inv.team_id)?.name : null;
             return (
               <div key={inv.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "13px 20px", borderBottom: i < pendingInvites.length - 1 ? `1px solid ${C.border}` : "none" }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{inv.email}</div>
                   <div style={{ fontSize: 11, color: C.textSub }}>
-                    {ROLE_LABELS[inv.role] ?? inv.role} ·{" "}
+                    {ROLE_LABELS[inv.role] ?? inv.role}
+                    {teamName_ ? ` · ${teamName_}` : ""}
+                    {" ·"}{" "}
                     {isExpired
                       ? <span style={{ color: "#ef4444" }}>Expired</span>
                       : inv.expiresAt ? `Expires ${new Date(inv.expiresAt).toLocaleDateString()}` : "No expiry"}
@@ -10261,7 +10392,6 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
             <span style={{ fontSize: 12, color: C.textSub }}>{showHistory ? "▲ Hide" : "▼ Show"}</span>
           </button>
           {showHistory && historyInvites.map((inv, i) => {
-            const ROLE_LABELS = { user: "Rep", orgAdmin: "Manager", superadmin: "Super Admin" };
             const statusColor = inv.status === "accepted" ? C.green : C.textMuted;
             return (
               <div key={inv.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 20px", borderTop: `1px solid ${C.border}` }}>
@@ -10281,14 +10411,10 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
         </div>
       )}
 
-      {/* Add member modal */}
+      {/* Invite member modal */}
       {showAdd && (
-        <div style={{
-          position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex",
-          alignItems: "center", justifyContent: "center", zIndex: 1000,
-        }}
-          onClick={e => { if (e.target === e.currentTarget) resetModal(); }}
-        >
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}
+          onClick={e => { if (e.target === e.currentTarget) resetModal(); }}>
           <div style={{ background: C.white, borderRadius: 16, padding: 32, width: 440, boxShadow: "0 24px 64px rgba(0,0,0,0.25)" }}>
             {submitted ? (
               <div style={{ textAlign: "center", padding: "8px 0 0" }}>
@@ -10299,15 +10425,13 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
                 </p>
                 {inviteUrl && (
                   <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 20 }}>
-                    <input
-                      readOnly value={inviteUrl}
+                    <input readOnly value={inviteUrl}
                       style={{ flex: 1, padding: "9px 10px", borderRadius: 8, border: `1.5px solid ${C.border}`, fontSize: 11, color: C.textSub, background: C.pageBg, outline: "none" }}
-                      onClick={e => e.target.select()}
-                    />
-                    <button
-                      onClick={() => navigator.clipboard.writeText(inviteUrl)}
-                      style={{ padding: "9px 14px", borderRadius: 8, border: "none", cursor: "pointer", background: C.orange, color: "#fff", fontSize: 12, fontWeight: 700 }}
-                    >Copy</button>
+                      onClick={e => e.target.select()} />
+                    <button onClick={() => navigator.clipboard.writeText(inviteUrl)}
+                      style={{ padding: "9px 14px", borderRadius: 8, border: "none", cursor: "pointer", background: C.orange, color: "#fff", fontSize: 12, fontWeight: 700 }}>
+                      Copy
+                    </button>
                   </div>
                 )}
                 <button onClick={resetModal} style={{ width: "100%", padding: "11px", borderRadius: 10, border: `1px solid ${C.border}`, background: C.white, color: C.text, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Done</button>
@@ -10315,7 +10439,7 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
             ) : (
               <>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 22 }}>
-                  <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: C.text }}>Invite Team Member</h3>
+                  <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: C.text }}>Invite Member</h3>
                   <button onClick={resetModal} style={{ background: "none", border: "none", fontSize: 18, color: C.textSub, cursor: "pointer" }}>✕</button>
                 </div>
                 <form onSubmit={handleAdd} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -10332,6 +10456,17 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
                       <option value="orgAdmin">Manager (Admin)</option>
                     </select>
                   </div>
+                  {/* Team selector — only shown when teams exist */}
+                  {teams !== null && teams.length > 0 && (
+                    <div>
+                      <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: C.textSub, marginBottom: 6, letterSpacing: "0.06em" }}>TEAM (OPTIONAL)</label>
+                      <select value={form.teamId} onChange={e => setForm(p => ({ ...p, teamId: e.target.value }))}
+                        style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: `1.5px solid ${C.border}`, fontSize: 13, color: C.text, background: C.white, outline: "none" }}>
+                        <option value="">No team assigned</option>
+                        {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                      </select>
+                    </div>
+                  )}
                   {inviteError && <p style={{ margin: 0, fontSize: 12, color: "#ef4444" }}>{inviteError}</p>}
                   <button type="submit" disabled={inviteLoading}
                     style={{ marginTop: 4, padding: "12px", borderRadius: 8, border: "none", cursor: inviteLoading ? "not-allowed" : "pointer", background: C.orange, color: "#fff", fontSize: 14, fontWeight: 700, opacity: inviteLoading ? 0.7 : 1 }}>
@@ -11453,6 +11588,12 @@ export default function App() {
     getTenantQuizzes(tenantId).then(({ data }) => {
       if (data && data.length > 0) setQuizzes(data);
     });
+
+    // Battle cards — real orgs start blank; use tenant-scoped localStorage keys
+    const savedCats  = localStorage.getItem(`ralli_bc_categories_${tenantId}`);
+    const savedCards = localStorage.getItem(`ralli_bc_cards_${tenantId}`);
+    setBcCategories(savedCats  ? JSON.parse(savedCats)  : []);
+    setBattleCards(savedCards  ? JSON.parse(savedCards) : []);
   }, [currentUser?.id, currentUser?._isReal]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Load orgAdmin's own tenant into orgs[] ────────────────────────────────
@@ -11685,17 +11826,20 @@ export default function App() {
   };
 
   // ── Battle card category CRUD ──
+  const bcCatKey   = currentOrg?.id ? `ralli_bc_categories_${currentOrg.id}` : "ralli_bc_categories";
+  const bcCardsKey = currentOrg?.id ? `ralli_bc_cards_${currentOrg.id}`      : "ralli_battle_cards";
+
   const handleSaveBcCategory = (cat) => {
     setBcCategories(prev => {
       const next = prev.find(c => c.id === cat.id) ? prev.map(c => c.id === cat.id ? cat : c) : [...prev, cat];
-      try { localStorage.setItem("ralli_bc_categories", JSON.stringify(next)); } catch {}
+      try { localStorage.setItem(bcCatKey, JSON.stringify(next)); } catch {}
       return next;
     });
   };
   const handleDeleteBcCategory = (id) => {
     setBcCategories(prev => {
       const next = prev.filter(c => c.id !== id);
-      try { localStorage.setItem("ralli_bc_categories", JSON.stringify(next)); } catch {}
+      try { localStorage.setItem(bcCatKey, JSON.stringify(next)); } catch {}
       return next;
     });
   };
@@ -11704,14 +11848,14 @@ export default function App() {
   const handleSaveBattleCard = (card) => {
     setBattleCards(prev => {
       const next = prev.find(c => c.id === card.id) ? prev.map(c => c.id === card.id ? card : c) : [...prev, card];
-      try { localStorage.setItem("ralli_battle_cards", JSON.stringify(next)); } catch {}
+      try { localStorage.setItem(bcCardsKey, JSON.stringify(next)); } catch {}
       return next;
     });
   };
   const handleDeleteBattleCard = (id) => {
     setBattleCards(prev => {
       const next = prev.filter(c => c.id !== id);
-      try { localStorage.setItem("ralli_battle_cards", JSON.stringify(next)); } catch {}
+      try { localStorage.setItem(bcCardsKey, JSON.stringify(next)); } catch {}
       return next;
     });
   };
@@ -11926,12 +12070,8 @@ export default function App() {
       case "rankd-lobby":       return <RankdLobbyScreen onNav={navigate} pin={lobbyPin} playerName={lobbyPlayerName} playerEmoji={lobbyPlayerEmoji} sessionName={lobbySessionName} role={gameRole} sessions={sessions} currentUser={currentUser} onGameStart={handleGameStart} chPlayers={chPlayers} broadcast={broadcast} playerId={playerId} chMsg={chMsg} />;
       case "rankd-game":        return <RankdGameScreen onNav={navigate} sessionName={lobbySessionName} role={gameRole} playerName={lobbyPlayerName ?? user.name} questions={gameQuestions ?? GAME_QUESTIONS} demoMode={gameRole === "admin" && sessions.find(s => s.code === lobbyPin)?.demoMode !== false} pin={lobbyPin} broadcast={broadcast} chMsg={chMsg} chAnswers={chAnswers} chPlayers={chPlayers} playerId={playerId} onGameEnd={handleGameEnd} />;
       case "rankd-results":     return <RankdResultsScreen onNav={navigate} sessionCode={viewResultsCode} sessions={sessions} gameData={gameResultsData} />;
-      case "learn":             return isOrgAdmin && orgUsers.filter(u => u.orgId === user.orgId && u._isReal).length === 0
-        ? <OrgAdminEmptyScreen feature="the Learn library" onGoToTeam={() => navigate("team")} />
-        : <LearnScreen role={gameRole} user={user} orgUsers={orgUsers} orgs={orgs} onNav={navigate} onAwardXp={handleAwardXp} pendingLessonId={pendingLessonId} onClearPendingLesson={() => setPendingLessonId(null)} canCreate={perm("actions","create")} canEdit={perm("actions","edit")} canDelete={perm("actions","delete")} canAssign={perm("actions","assign")} tenantId={currentOrg?.id ?? null} isReal={!!user?._isReal} />;
-      case "quizzes":           return isOrgAdmin && orgUsers.filter(u => u.orgId === user.orgId && u._isReal).length === 0
-        ? <OrgAdminEmptyScreen feature="quizzes and assignments" onGoToTeam={() => navigate("team")} />
-        : <QuizzesScreen role={gameRole} onNav={navigate} quizzes={quizzes} onEditQuiz={handleEditQuiz} onDeleteQuiz={handleDeleteQuiz} onToggleFavorite={handleToggleFavorite} onToggleActive={handleToggleActive} pendingQuizId={pendingQuizId} onClearPendingQuiz={() => setPendingQuizId(null)} canCreate={perm("actions","create")} canEdit={perm("actions","edit")} canDelete={perm("actions","delete")} canLaunch={perm("actions","launch")} />;
+      case "learn":             return <LearnScreen role={gameRole} user={user} orgUsers={orgUsers} orgs={orgs} onNav={navigate} onAwardXp={handleAwardXp} pendingLessonId={pendingLessonId} onClearPendingLesson={() => setPendingLessonId(null)} canCreate={perm("actions","create")} canEdit={perm("actions","edit")} canDelete={perm("actions","delete")} canAssign={perm("actions","assign")} tenantId={currentOrg?.id ?? null} isReal={!!user?._isReal} />;
+      case "quizzes":           return <QuizzesScreen role={gameRole} onNav={navigate} quizzes={quizzes} onEditQuiz={handleEditQuiz} onDeleteQuiz={handleDeleteQuiz} onToggleFavorite={handleToggleFavorite} onToggleActive={handleToggleActive} pendingQuizId={pendingQuizId} onClearPendingQuiz={() => setPendingQuizId(null)} canCreate={perm("actions","create")} canEdit={perm("actions","edit")} canDelete={perm("actions","delete")} canLaunch={perm("actions","launch")} />;
       case "battlecards":       return (isAdminType && perm("actions","edit"))
         ? <BattleCardsAdminScreen categories={bcCategories} cards={battleCards} onSaveCategory={handleSaveBcCategory} onDeleteCategory={handleDeleteBcCategory} onSaveCard={handleSaveBattleCard} onDeleteCard={handleDeleteBattleCard} />
         : <BattleCardsScreen categories={bcCategories} cards={battleCards} />;
@@ -11940,7 +12080,7 @@ export default function App() {
             ? <OrgAdminEmptyScreen feature="progress and analytics" onGoToTeam={() => navigate("team")} />
             : <LeadershipDashboardScreen currentOrg={currentOrg} orgUsers={orgUsers} />)
         : <ProgressScreen />;
-      case "leaderboard":       return <LeaderboardScreen currentUser={user} />;
+      case "leaderboard":       return <LeaderboardScreen currentUser={user} isReal={!!user?._isReal} />;
       case "organizations":     return selectedOrg
         ? <OrgDetailScreen org={selectedOrg} orgUsers={orgUsers} onBack={() => setSelectedOrg(null)} onAddUser={handleAddUser} onDeactivateOrg={handleDeactivateOrg} onReactivateOrg={handleReactivateOrg} onDeleteOrg={handleDeleteOrg} onCancelOrg={handleCancelOrg} onUpdateOrg={handleUpdateOrg} onUpdateMember={handleUpdateMember} onRemoveMember={handleRemoveMember} onCancelInvite={handleCancelInvite} onResendMemberInvite={handleResendMemberInvite} />
         : <OrganizationsScreen orgs={orgs} onInviteOrg={handleInviteOrg} onSelectOrg={(org) => setSelectedOrg(org)} onRefresh={handleRefreshOrgs} onDeactivateOrg={handleDeactivateOrg} onReactivateOrg={handleReactivateOrg} onDeleteOrg={handleDeleteOrg} onCancelOrg={handleCancelOrg} />;
