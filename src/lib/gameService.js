@@ -143,6 +143,84 @@ export async function endGameSession(pin, { scores = [], tenantId = null } = {})
   return { data: session, error: null };
 }
 
+// ── LOBBY PARTICIPANTS ────────────────────────────────────────────────────────
+
+/**
+ * Persist a player joining the lobby. Upserts so re-joins are safe.
+ * Call immediately after the user confirms their name in the name-entry screen.
+ *
+ * @param {string} sessionId - game_sessions.id (UUID, the DB primary key, not the PIN)
+ * @param {{ playerId: string, name: string, emoji?: string|null, color?: string|null, tenantId?: string|null }} params
+ * @returns {Promise<{ data: Object|null, error: Object|null }>}
+ */
+export async function joinGameSession(sessionId, { playerId, name, emoji = null, color = null, tenantId = null }) {
+  const { data, error } = await supabase
+    .from("game_session_participants")
+    .upsert(
+      {
+        session_id: sessionId,
+        player_id:  playerId,
+        tenant_id:  tenantId,
+        name,
+        emoji,
+        color,
+        joined_at:  new Date().toISOString(),
+      },
+      { onConflict: "session_id,player_id" }
+    )
+    .select()
+    .single();
+  return { data, error };
+}
+
+/**
+ * Fetch the current lobby roster for a session.
+ * Used by the manager lobby on mount and as a polling fallback.
+ *
+ * @param {string} sessionId - game_sessions.id (UUID)
+ * @returns {Promise<{ data: Object[]|null, error: Object|null }>}
+ */
+export async function getLobbyParticipants(sessionId) {
+  const { data, error } = await supabase
+    .from("game_session_participants")
+    .select("*")
+    .eq("session_id", sessionId)
+    .order("joined_at", { ascending: true });
+  return { data, error };
+}
+
+/**
+ * Subscribe to new participants joining this lobby (postgres_changes INSERT).
+ * Returns the Supabase channel so the caller can unsubscribe on cleanup.
+ *
+ * Usage:
+ *   const channel = subscribeToLobbyParticipants(sessionId, (row) => addPlayer(row));
+ *   // cleanup:
+ *   supabase.removeChannel(channel);
+ *
+ * @param {string} sessionId - game_sessions.id (UUID)
+ * @param {(row: Object) => void} onInsert - called with the new participant row
+ * @returns {RealtimeChannel}
+ */
+export function subscribeToLobbyParticipants(sessionId, onInsert) {
+  const channel = supabase
+    .channel(`lobby_participants:${sessionId}`)
+    .on(
+      "postgres_changes",
+      {
+        event:  "INSERT",
+        schema: "public",
+        table:  "game_session_participants",
+        filter: `session_id=eq.${sessionId}`,
+      },
+      (payload) => {
+        if (payload.new) onInsert(payload.new);
+      }
+    )
+    .subscribe();
+  return channel;
+}
+
 // ── ANALYTICS ─────────────────────────────────────────────────────────────────
 
 /**
