@@ -450,17 +450,17 @@ function HomeScreen({ user, onNav, quizAssignments = [], onResumeLesson, onStart
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14 }}>
         {[
           {
-            iconBg: C.orange, label: "Knowledge Score", value: String(user.score), sub: "/100",
-            note: "+4 pts this week", noteColor: C.green,
+            iconBg: C.orange, label: "Knowledge Score", value: user.score != null ? String(user.score) : "—", sub: user.score != null ? "/100" : "",
+            note: user.score != null ? "+4 pts this week" : "No data yet", noteColor: C.green,
             tooltip: "Your Knowledge Score reflects quiz accuracy, lesson completion, and game performance over the past 30 days. Scores range from 0–100 and update within 24 hours of activity.",
           },
           {
-            iconBg: C.green, label: "Team Rank", value: `#${user.rank}`, sub: " of 18",
-            note: user.rank <= 3 ? "↑ Top performer" : user.rank <= 5 ? "↑ Up 1 spot" : "Keep pushing",
+            iconBg: C.green, label: "Team Rank", value: user.rank != null ? `#${user.rank}` : "—", sub: user.rank != null ? " of 18" : "",
+            note: user.rank == null ? "No data yet" : user.rank <= 3 ? "↑ Top performer" : user.rank <= 5 ? "↑ Up 1 spot" : "Keep pushing",
             noteColor: user.rank <= 3 ? C.green : C.textSub,
           },
           {
-            iconBg: C.blue, label: "Weekly Change", value: user.weeklyChange.replace("%", ""), sub: "%",
+            iconBg: C.blue, label: "Weekly Change", value: user.weeklyChange ? user.weeklyChange.replace("%", "") : "—", sub: user.weeklyChange ? "%" : "",
             note: "vs last week", noteColor: C.textSub,
             tooltip: `Compares your Knowledge Score this week (${todayLabel} back 7 days) to the prior 7-day period. Positive = improvement. Scores consider quiz results, lesson completions, and game performance.`,
           },
@@ -11600,6 +11600,43 @@ function UserSettingsScreen({ user, profile, notifPrefs, onSaveProfile, onSaveNo
   );
 }
 
+// ── App Error Boundary ────────────────────────────────────────────────────────
+// Prevents render crashes (e.g. undefined field access) from showing a blank page.
+// Shows a recovery screen with the error message and a reload button instead.
+class AppErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, info) {
+    console.error("[ralli] Render error:", error, info?.componentStack);
+  }
+  render() {
+    if (!this.state.hasError) return this.props.children;
+    return (
+      <div style={{
+        minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
+        background: "#F9FAFB", fontFamily: "'Inter', sans-serif", padding: 24,
+      }}>
+        <div style={{ maxWidth: 420, textAlign: "center" }}>
+          <div style={{ fontSize: 36, marginBottom: 16 }}>⚠️</div>
+          <h2 style={{ fontSize: 20, fontWeight: 800, color: "#0B1220", margin: "0 0 8px" }}>Something went wrong</h2>
+          <p style={{ fontSize: 14, color: "#64748B", margin: "0 0 24px" }}>
+            {this.state.error?.message ?? "An unexpected error occurred."}
+          </p>
+          <button
+            onClick={() => window.location.reload()}
+            style={{ padding: "10px 24px", borderRadius: 8, border: "none", cursor: "pointer", background: "#F97316", color: "#fff", fontSize: 14, fontWeight: 700 }}
+          >Reload</button>
+        </div>
+      </div>
+    );
+  }
+}
+
 export default function App() {
   React.useEffect(() => {
     const link = document.createElement("link");
@@ -11809,6 +11846,49 @@ export default function App() {
         if (!t) return;
         const norm = { ...t, adminEmail: t.admin_email, seatLimit: t.seat_limit ?? 10, seats: t.seat_limit ?? 10, createdAt: t.created_at?.split("T")[0], updatedAt: t.updated_at?.split("T")[0] };
         setOrgs(prev => [norm, ...prev.filter(o => o.id !== t.id)]);
+      });
+  }, [currentUser?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Load tenant + orgUsers for real regular users ─────────────────────────
+  // When role=user logs in (invite or normal login), currentOrg is null because
+  // orgs[] only has seed data. Load the real tenant so currentOrg resolves
+  // (needed for userPlan, feature gating, org badge in sidebar) and load
+  // their teammates so team-scoped components show real data.
+  useEffect(() => {
+    if (!currentUser?._isReal || currentUser.role !== "user" || !currentUser.orgId) return;
+    const tenantId = currentUser.orgId;
+
+    // Load tenant row → currentOrg, userPlan
+    if (!orgs.find(o => o.id === tenantId)) {
+      supabase.from("tenants").select("*").eq("id", tenantId).single()
+        .then(({ data: t }) => {
+          if (!t) return;
+          const norm = { ...t, adminEmail: t.admin_email, seatLimit: t.seat_limit ?? 10, seats: t.seat_limit ?? 10, createdAt: t.created_at?.split("T")[0], updatedAt: t.updated_at?.split("T")[0] };
+          setOrgs(prev => [norm, ...prev.filter(o => o.id !== t.id)]);
+        });
+    }
+
+    // Load tenant members → orgUsers (for leaderboard, assign screens, etc.)
+    supabase.from("profiles").select("*").eq("tenant_id", tenantId).neq("status", "inactive")
+      .then(({ data: members }) => {
+        if (!members?.length) return;
+        const realMembers = members.map(m => ({
+          id: m.id, email: m.email,
+          name: m.name ?? m.email?.split("@")[0] ?? "User",
+          initials: (m.name ?? m.email ?? "U").split(" ").map(p => p[0] ?? "").join("").toUpperCase().slice(0, 2) || "U",
+          role: m.role ?? "user",
+          orgId: m.tenant_id,
+          color: m.color ?? "#F97316",
+          xp: m.xp ?? 0,
+          streak: m.streak ?? 0,
+          status: m.status ?? "active",
+          _isReal: true,
+        }));
+        // Replace any seed members from this tenant, keep members from other (seed) tenants
+        setOrgUsers(prev => [
+          ...prev.filter(u => u.orgId !== tenantId && !u._isReal),
+          ...realMembers,
+        ]);
       });
   }, [currentUser?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -12317,6 +12397,7 @@ export default function App() {
   };
 
   return (
+    <AppErrorBoundary>
     <div style={{
       display: "flex", height: "100vh",
       fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
@@ -12351,13 +12432,15 @@ export default function App() {
             {user.role === "user" && (
               <div style={{ marginTop: 16, padding: "12px 14px", background: C.orangeLight, borderRadius: 10 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 6 }}>
-                  <span style={{ fontWeight: 700, color: C.text }}>LEVEL {user.level}</span>
-                  <span style={{ color: C.orangeDark, fontWeight: 700 }}>{user.xp.toLocaleString()} XP</span>
+                  <span style={{ fontWeight: 700, color: C.text }}>{user.level != null ? `LEVEL ${user.level}` : "LEVEL 1"}</span>
+                  <span style={{ color: C.orangeDark, fontWeight: 700 }}>{(user.xp ?? 0).toLocaleString()} XP</span>
                 </div>
-                <ProgressBar value={user.xp} max={user.xpNext} color={C.orange} height={5} trackColor="rgba(11,18,32,0.1)" />
-                <div style={{ fontSize: 10, color: C.textMuted, marginTop: 5 }}>
-                  {(user.xpNext - user.xp).toLocaleString()} XP to Level {user.level + 1}
-                </div>
+                <ProgressBar value={user.xp ?? 0} max={user.xpNext ?? 1000} color={C.orange} height={5} trackColor="rgba(11,18,32,0.1)" />
+                {user.xpNext != null && (
+                  <div style={{ fontSize: 10, color: C.textMuted, marginTop: 5 }}>
+                    {(user.xpNext - (user.xp ?? 0)).toLocaleString()} XP to Level {(user.level ?? 1) + 1}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -12569,5 +12652,6 @@ export default function App() {
         </div>
       )}
     </div>
+    </AppErrorBoundary>
   );
 }
