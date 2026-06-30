@@ -259,7 +259,10 @@ export async function getTenantQuizzes(tenantId) {
  */
 export async function upsertQuiz(tenantId, quiz, userId) {
   const payload = quizToDb(quiz, tenantId, userId);
-  const isLegacyId = !quiz.id || quiz.id.startsWith("quiz_") || quiz.id.startsWith("sq_");
+  // Only treat as existing DB row if id is a real UUID returned from a prior insert.
+  // Date.now() timestamps, "quiz_*", "sq_*", and any other non-UUID strings → INSERT.
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const isLegacyId = !quiz.id || !UUID_RE.test(quiz.id);
 
   if (!isLegacyId && quiz.id) {
     // UUID — update existing

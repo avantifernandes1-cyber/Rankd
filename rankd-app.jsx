@@ -21,6 +21,9 @@ import {
   startGameSession,
   endGameSession,
   getActiveSessions,
+  joinGameSession,
+  getLobbyParticipants,
+  subscribeToLobbyParticipants,
 } from "./src/lib/gameService.js";
 import {
   getTenantCourses,
@@ -3446,10 +3449,11 @@ function RankdNameEntryScreen({ onNav, pin, sessionName, onConfirm, defaultName,
 
 function RankdLobbyScreen({ onNav, pin, playerName, playerEmoji, sessionName, role, sessions = [], currentUser, onGameStart, chPlayers, broadcast, playerId, chMsg }) {
   const mobile = useMobile();
-  const session = sessions.find(s => s.code === pin);
-  // Reps are always real players — demoMode only applies to admin with an explicit demo session.
-  // Previously `session?.demoMode !== false` defaulted to true when the session wasn't in the
-  // rep's local state, suppressing PLAYER_JOIN and triggering fake bots.
+  const session     = sessions.find(s => s.code === pin);
+  const sessionDbId = session?.dbId ?? null;
+
+  // demoMode: true only when admin has explicitly created a demo session.
+  // A real tenant session always has demoMode: false (set in handleCreateSession).
   const isDemoMode = role === "admin" && session?.demoMode !== false;
 
   // Demo mode: animated fake players
@@ -3457,14 +3461,66 @@ function RankdLobbyScreen({ onNav, pin, playerName, playerEmoji, sessionName, ro
   const [dots, setDots]                 = useState(".");
   const [pulse, setPulse]               = useState(false);
 
+  // DB-backed participant list for the manager lobby.
+  // Source of truth: game_session_participants rows for this session.
+  const [dbPlayers, setDbPlayers] = useState([]);
+
+  const normParticipant = (p) => ({
+    id:    p.player_id ?? p.id,
+    name:  p.name,
+    emoji: p.emoji  ?? PLAYER_EMOJIS[0],
+    color: p.color  ?? PLAYER_COLORS[0],
+    score: 0,
+  });
+
+  // ── Admin: load initial participants from DB ────────────────────────────────
+  useEffect(() => {
+    if (role !== "admin" || !sessionDbId || isDemoMode) return;
+    getLobbyParticipants(sessionDbId).then(({ data }) => {
+      if (data) setDbPlayers(data.map(normParticipant));
+    });
+  }, [sessionDbId, isDemoMode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Admin: subscribe to realtime INSERTs on game_session_participants ───────
+  // Fires immediately when a player calls joinGameSession(), cross-device.
+  useEffect(() => {
+    if (role !== "admin" || !sessionDbId || isDemoMode) return;
+    const channel = subscribeToLobbyParticipants(sessionDbId, (row) => {
+      setDbPlayers(prev => {
+        if (prev.some(p => p.id === row.player_id)) return prev; // already present
+        return [...prev, normParticipant(row)];
+      });
+    });
+    return () => { supabase.removeChannel(channel); };
+  }, [sessionDbId, isDemoMode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Admin: poll every 4s as fallback when realtime isn't enabled ────────────
+  useEffect(() => {
+    if (role !== "admin" || !sessionDbId || isDemoMode) return;
+    const interval = setInterval(() => {
+      getLobbyParticipants(sessionDbId).then(({ data }) => {
+        if (data) setDbPlayers(data.map(normParticipant));
+      });
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [sessionDbId, isDemoMode]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const basePlayer = role === "admin"
     ? { name: currentUser?.name ?? "Host", emoji: "🦁", color: C.green }
     : { name: playerName || "You", emoji: "🦊", color: C.orange };
 
   const demoAllPlayers = [basePlayer, ...LOBBY_PLAYERS.filter(p => p.name !== basePlayer.name)];
 
-  // Real mode: players from channel
-  const realPlayers = isDemoMode ? [] : chPlayers;
+  // Real mode: merge DB participants (source of truth) with Presence players (belt-and-suspenders).
+  // Deduplicate by id so the same player doesn't appear twice.
+  const combinedRealPlayers = (() => {
+    if (isDemoMode) return [];
+    const map = new Map();
+    [...dbPlayers, ...chPlayers].forEach(p => { if (p.id) map.set(p.id, p); });
+    return Array.from(map.values());
+  })();
+
+  const realPlayers    = isDemoMode ? [] : combinedRealPlayers;
   const displayPlayers = isDemoMode ? demoAllPlayers.slice(0, visibleCount) : realPlayers;
 
   // Player side: announce join via channel
@@ -12169,11 +12225,21 @@ export default function App() {
 
   // ── Quiz CRUD ──
   const handleSaveQuiz = async (quiz) => {
-    // For real users, persist to Supabase and get a stable UUID back
-    if (user?._isReal && currentOrg?.id) {
-      const { data: saved, error } = await upsertQuiz(currentOrg.id, quiz, user.id);
+    // For real users, persist to Supabase and get a stable UUID back.
+    // Fall back to user.orgId if currentOrg hasn't loaded yet (async race on first login).
+    const orgId = currentOrg?.id ?? user?.orgId ?? null;
+    if (user?._isReal && orgId) {
+      const { data: saved, error } = await upsertQuiz(orgId, quiz, user.id);
       if (error) console.error("[ralli] upsertQuiz failed:", error);
-      const canonical = saved ?? quiz;
+      // Only use saved (with stable DB UUID) if the upsert succeeded.
+      // If it failed, don't silently add a non-persisted quiz to state for real users.
+      if (!saved) {
+        console.error("[ralli] handleSaveQuiz: upsert returned no data, aborting state update");
+        setEditingQuiz(null);
+        setScreen("quizzes");
+        return;
+      }
+      const canonical = saved;
       setQuizzes(prev => {
         const updated = prev.find(q => q.id === quiz.id || q.id === canonical.id)
           ? prev.map(q => (q.id === quiz.id || q.id === canonical.id) ? canonical : q)
@@ -12257,6 +12323,16 @@ export default function App() {
       // Player is on a different device — fetch session metadata from Supabase
       const { data: remote } = await findSessionByPin(pin);
       if (remote) {
+        // Cross-tenant protection: real users can only join their own org's sessions
+        if (currentUser?._isReal && remote.tenant_id && remote.tenant_id !== currentUser.orgId) {
+          console.warn("[ralli] handleEnterPin: cross-tenant join blocked");
+          return;
+        }
+        // Only allow joining sessions that are actively waiting for players
+        if (remote.status && remote.status !== "waiting") {
+          console.warn("[ralli] handleEnterPin: session not accepting players, status:", remote.status);
+          return;
+        }
         const fetched = {
           code:          remote.pin,
           name:          remote.name,
@@ -12266,6 +12342,7 @@ export default function App() {
           playerCount:   remote.player_count,
           demoMode:      remote.demo_mode,
           players:       [],
+          dbId:          remote.id,   // DB primary key — used for lobby participant persistence
         };
         setSessions(prev => [...prev, fetched]);
         sessionName = remote.name;
@@ -12285,15 +12362,35 @@ export default function App() {
     setScreen("rankd-name-entry");
   };
 
-  // User: confirmed name → add to session players → go to lobby
+  // User: confirmed name → persist participant to Supabase → go to lobby
   const handleEnterName = (name, emoji) => {
     setLobbyPlayerName(name);
     if (emoji) setLobbyPlayerEmoji(emoji);
+
+    // Update local session state (keeps existing local-state consumers working)
     setSessions(prev => prev.map(s =>
       s.code === lobbyPin
         ? { ...s, players: [...(s.players ?? []).filter(p => p.id !== currentUser?.id), { id: currentUser?.id ?? name, name, joinedAt: Date.now() }], playerCount: (s.playerCount ?? 0) + 1 }
         : s
     ));
+
+    // Persist participant to Supabase so manager sees them cross-device.
+    // Fire-and-forget — lobby navigation doesn't wait for DB write.
+    const joiningSession = sessions.find(s => s.code === lobbyPin);
+    const sessionDbId    = joiningSession?.dbId ?? null;
+    if (sessionDbId && currentUser) {
+      const pidx  = Math.abs(playerId.charCodeAt(0) + (playerId.charCodeAt(1) || 0)) % PLAYER_EMOJIS.length;
+      const pEmoji = emoji ?? PLAYER_EMOJIS[pidx];
+      const pColor = PLAYER_COLORS[pidx % PLAYER_COLORS.length];
+      joinGameSession(sessionDbId, {
+        playerId: currentUser.id ?? playerId,
+        name,
+        emoji:    pEmoji,
+        color:    pColor,
+        tenantId: currentUser.orgId ?? null,
+      }).catch(e => console.error("[ralli] joinGameSession failed:", e));
+    }
+
     setScreen("rankd-lobby");
   };
 
