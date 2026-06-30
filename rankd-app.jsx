@@ -11096,9 +11096,9 @@ export default function App() {
           setCurrentUser(profile);
           if (isRalliAdmin(profile.role)) {
             setScreen("organizations");
-            // Fetch real tenants from Supabase for ralli_admin
+            setOrgs([]); // clear seed/mock orgs — ralli admin sees only real Supabase tenants
             supabase.from("tenants").select("*").order("created_at", { ascending: false })
-              .then(({ data }) => { if (data?.length) setOrgs(data.map(t => ({ ...t, adminEmail: t.admin_email, seatLimit: t.seat_limit ?? 10, seats: t.seat_limit ?? 10, createdAt: t.created_at?.split("T")[0], updatedAt: t.updated_at?.split("T")[0] }))); });
+              .then(({ data }) => { setOrgs(data ? data.map(t => ({ ...t, adminEmail: t.admin_email, seatLimit: t.seat_limit ?? 10, seats: t.seat_limit ?? 10, createdAt: t.created_at?.split("T")[0], updatedAt: t.updated_at?.split("T")[0] })) : []); });
           } else if (profile.role === "orgAdmin") {
             // Check tenant status — if still onboarding, show setup; otherwise go to team
             if (profile.orgId) {
@@ -11238,7 +11238,7 @@ export default function App() {
 
   const handleRefreshOrgs = () => {
     supabase.from("tenants").select("*").order("created_at", { ascending: false })
-      .then(({ data }) => { if (data?.length) setOrgs(data.map(t => ({ ...t, adminEmail: t.admin_email, seatLimit: t.seat_limit ?? 10, seats: t.seat_limit ?? 10, createdAt: t.created_at?.split("T")[0], updatedAt: t.updated_at?.split("T")[0] }))); });
+      .then(({ data }) => { setOrgs(data ? data.map(t => ({ ...t, adminEmail: t.admin_email, seatLimit: t.seat_limit ?? 10, seats: t.seat_limit ?? 10, createdAt: t.created_at?.split("T")[0], updatedAt: t.updated_at?.split("T")[0] })) : []); });
   };
 
   // UUID guard — seed/demo orgs have string IDs like "org_momence" which Postgres rejects as uuid type
