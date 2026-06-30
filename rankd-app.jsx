@@ -11688,6 +11688,24 @@ export default function App() {
   // Production hook: replace with billing provider plan lookup (e.g. Stripe subscription).
   const userPlan = isSuperAdmin ? "enterprise" : normalizePlan(currentOrg?.plan);
 
+  // Tenant feature_access overrides — loaded from tenant_settings for real users.
+  // Ralli Admin can toggle these per-tenant; they override the plan-based defaults.
+  const [tenantFeatureAccess, setTenantFeatureAccess] = useState(null); // null = not yet loaded
+
+  // Map NAV featureKey → tenant_settings.feature_access key
+  const FEATURE_KEY_MAP = { games: "games", learn: "learn", leaderboard: "learn", progress: "analytics", battlecards: "battle_cards", quizzes: "learn", dashboard: null };
+
+  // Feature access check: tenant_settings overrides take priority over plan defaults.
+  // Superadmin and demo accounts bypass overrides.
+  const canAccessTenant = (featureKey) => {
+    if (isSuperAdmin) return true;
+    const settKey = FEATURE_KEY_MAP[featureKey];
+    if (settKey && tenantFeatureAccess !== null && settKey in tenantFeatureAccess) {
+      return !!tenantFeatureAccess[settKey];
+    }
+    return canAccess(featureKey, userPlan);
+  };
+
   // Role permissions — admin-controlled, org-scoped, localStorage-backed.
   // Production hook: replace loadRolePermissions with API fetch on mount.
   const [rolePermissions, setRolePermissions] = useState(() =>
@@ -11771,6 +11789,10 @@ export default function App() {
     const savedCards = localStorage.getItem(`ralli_bc_cards_${tenantId}`);
     setBcCategories(savedCats  ? JSON.parse(savedCats)  : []);
     setBattleCards(savedCards  ? JSON.parse(savedCards) : []);
+
+    // Feature access — load tenant_settings.feature_access so nav reflects Ralli Admin overrides
+    supabase.from("tenant_settings").select("feature_access").eq("tenant_id", tenantId).single()
+      .then(({ data: ts }) => { if (ts?.feature_access) setTenantFeatureAccess(ts.feature_access); });
   }, [currentUser?.id, currentUser?._isReal]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Load orgAdmin's own tenant into orgs[] ────────────────────────────────
@@ -11911,45 +11933,73 @@ export default function App() {
     if (selectedOrg?.id === orgId) setSelectedOrg(null);
   };
 
-  // Cancel org — sets status to 'canceled' (distinct from suspended; not reversible to active without deliberate reactivation)
+  // JS mirror of get_plan_features() SQL function — keeps feature defaults in sync
+  // without requiring the update_tenant RPC. Update both when plan tiers change.
+  const getPlanFeaturesJS = (plan) => {
+    const p = (plan ?? "").toLowerCase();
+    if (p === "starter")    return { games: true,  learn: true, quizzes: true, battle_cards: false, analytics: false, integrations: false, custom_branding: false };
+    if (p === "growth")     return { games: true,  learn: true, quizzes: true, battle_cards: true,  analytics: true,  integrations: false, custom_branding: false };
+    if (p === "enterprise") return { games: true,  learn: true, quizzes: true, battle_cards: true,  analytics: true,  integrations: true,  custom_branding: true  };
+    return                         { games: true,  learn: true, quizzes: false, battle_cards: false, analytics: false, integrations: false, custom_branding: false };
+  };
+
+  // Cancel org — sets status to 'canceled'.
+  // Uses direct table update (update_tenant RPC may not be deployed yet).
   const handleCancelOrg = async (orgId) => {
     if (!isRealTenantId(orgId)) throw new Error("This organization is a demo record and cannot be modified.");
-    const { error } = await supabase.rpc("update_tenant", {
-      p_tenant_id:   orgId,
-      p_name:        null,
-      p_plan:        null,
-      p_seat_limit:  null,
-      p_status:      "canceled",
-      p_domain:      null,
-      p_admin_email: null,
-    });
+    const { error } = await supabase.from("tenants")
+      .update({ status: "canceled", updated_at: new Date().toISOString() })
+      .eq("id", orgId);
     if (error) { console.error("[ralli] cancel_org failed:", error); throw error; }
     setOrgs(prev => prev.map(o => o.id === orgId ? { ...o, status: "canceled" } : o));
   };
 
   const handleUpdateOrg = async (orgId, fields) => {
-    const { data, error } = await supabase.rpc("update_tenant", {
-      p_tenant_id:   orgId,
-      p_name:        fields.name        ?? null,
-      p_plan:        fields.plan        ?? null,
-      p_seat_limit:  fields.seatLimit   ?? null,
-      p_status:      fields.status      ?? null,
-      p_domain:      fields.domain      ?? null,
-      p_admin_email: fields.adminEmail  ?? null,
-    });
-    if (error) { console.error("[ralli] update_tenant failed:", error); throw error; }
-    // Merge updated fields into local orgs state
+    // Build update payload — only include defined fields
+    const payload = { updated_at: new Date().toISOString() };
+    if (fields.name      != null) payload.name         = fields.name.trim() || null;
+    if (fields.plan      != null) payload.plan         = fields.plan.toLowerCase();
+    if (fields.seatLimit != null) payload.seat_limit   = parseInt(fields.seatLimit) || null;
+    if (fields.status    != null) payload.status       = fields.status;
+    if (fields.domain    !== undefined) payload.domain       = fields.domain?.trim() || null;
+    if (fields.adminEmail !== undefined) payload.admin_email = fields.adminEmail?.trim().toLowerCase() || null;
+
+    const { data, error } = await supabase.from("tenants")
+      .update(payload)
+      .eq("id", orgId)
+      .select()
+      .single();
+    if (error) { console.error("[ralli] handleUpdateOrg failed:", error); throw error; }
+
+    // When plan changes, reset tenant_settings.feature_access to plan defaults
+    if (fields.plan != null) {
+      const planFeatures = getPlanFeaturesJS(fields.plan);
+      const { error: settErr } = await supabase.from("tenant_settings")
+        .update({ feature_access: planFeatures, updated_at: new Date().toISOString() })
+        .eq("tenant_id", orgId);
+      if (settErr) console.warn("[ralli] feature_access reset failed:", settErr.message);
+    }
+
     setOrgs(prev => prev.map(o => o.id === orgId ? {
       ...o,
-      name:       data.name       ?? o.name,
+      name:       data.name        ?? o.name,
       plan:       data.plan ? (data.plan.charAt(0).toUpperCase() + data.plan.slice(1)) : o.plan,
-      seats:      data.seatLimit  ?? o.seats,
-      seatLimit:  data.seatLimit  ?? o.seatLimit,
-      status:     data.status     ?? o.status,
-      domain:     data.domain     ?? o.domain,
-      adminEmail: data.adminEmail ?? o.adminEmail,
+      seats:      data.seat_limit  ?? o.seats,
+      seatLimit:  data.seat_limit  ?? o.seatLimit,
+      status:     data.status      ?? o.status,
+      domain:     data.domain      ?? o.domain,
+      adminEmail: data.admin_email ?? o.adminEmail,
     } : o));
-    return data;
+
+    return {
+      tenantId:   data.id,
+      name:       data.name,
+      plan:       data.plan,
+      seatLimit:  data.seat_limit,
+      status:     data.status,
+      domain:     data.domain,
+      adminEmail: data.admin_email,
+    };
   };
 
   const handleUpdateMember = async (profileId, fields) => {
@@ -12251,9 +12301,7 @@ export default function App() {
         ? <BattleCardsAdminScreen categories={bcCategories} cards={battleCards} onSaveCategory={handleSaveBcCategory} onDeleteCategory={handleDeleteBcCategory} onSaveCard={handleSaveBattleCard} onDeleteCard={handleDeleteBattleCard} />
         : <BattleCardsScreen categories={bcCategories} cards={battleCards} />;
       case "progress":          return isAdminType
-        ? (isOrgAdmin && orgUsers.filter(u => u.orgId === user.orgId && u._isReal).length === 0
-            ? <OrgAdminEmptyScreen feature="progress and analytics" onGoToTeam={() => navigate("team")} />
-            : <LeadershipDashboardScreen currentOrg={currentOrg} orgUsers={orgUsers} />)
+        ? <LeadershipDashboardScreen currentOrg={currentOrg} orgUsers={orgUsers} isReal={!!user?._isReal} />
         : <ProgressScreen />;
       case "leaderboard":       return <LeaderboardScreen currentUser={user} isReal={!!user?._isReal} />;
       case "organizations":     return selectedOrg
@@ -12328,7 +12376,7 @@ export default function App() {
               ] : [
                 // Filter nav items by (1) subscription plan and (2) admin-controlled role permission.
                 ...NAV_ITEMS.filter(item =>
-                  (!item.featureKey || canAccess(item.featureKey, userPlan)) &&
+                  (!item.featureKey || canAccessTenant(item.featureKey)) &&
                   perm("features", item.permKey ?? item.id)
                 ),
                 // Team is managed inside Settings for org admins
@@ -12502,7 +12550,7 @@ export default function App() {
           display: "flex", alignItems: "stretch", flexShrink: 0,
         }}>
           {NAV_ITEMS.filter(item =>
-            (!item.featureKey || canAccess(item.featureKey, userPlan)) &&
+            (!item.featureKey || canAccessTenant(item.featureKey)) &&
             perm("features", item.permKey ?? item.id)
           ).map(item => {
             const active = screen === item.id || (screen.startsWith("rankd-") && item.id === "rankd");
