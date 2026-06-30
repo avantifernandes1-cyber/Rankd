@@ -37,12 +37,21 @@ export function isRalliAdmin(role) {
 //   return entitlements[featureKey] === true;
 
 export const FEATURE_CONFIG = {
+  // All plans (including demo / free tier)
   dashboard:      ["demo", "starter", "pro", "enterprise"],
-  games:          ["starter", "pro", "enterprise"],
+
+  // Starter+: Learn, Quizzes (via "learn"), Battle Cards (via "learn"), Leaderboard
   learn:          ["starter", "pro", "enterprise"],
+  leaderboard:    ["starter", "pro", "enterprise"],
+
+  // Pro+ only
+  games:          ["pro", "enterprise"],   // ralli game launcher
+  progress:       ["pro", "enterprise"],   // progress / leadership dashboard
   analytics:      ["pro", "enterprise"],
+
+  // Enterprise only
   aiInsights:     ["enterprise"],
-  integrations:   ["pro", "enterprise"],
+  integrations:   ["enterprise"],
   customBranding: ["enterprise"],
 };
 

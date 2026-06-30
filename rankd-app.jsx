@@ -10605,8 +10605,8 @@ const NAV_ITEMS = [
   { id: "learn",       label: "Learn",        icon: "", featureKey: "learn",     permKey: "learn" },
   { id: "quizzes",     label: "Quizzes",      icon: "", featureKey: "learn",     permKey: "quizzes" },
   { id: "battlecards", label: "Battle Cards", icon: "", featureKey: "learn",     permKey: "battlecards" },
-  { id: "progress",    label: "Progress",     adminLabel: "Leadership",  icon: "", featureKey: "dashboard", permKey: "progress" },
-  { id: "leaderboard", label: "Leaderboard",  icon: "", badge: "#3", featureKey: "games", permKey: "leaderboard" },
+  { id: "progress",    label: "Progress",     adminLabel: "Leadership",  icon: "", featureKey: "progress",    permKey: "progress" },
+  { id: "leaderboard", label: "Leaderboard",  icon: "", badge: "#3", featureKey: "leaderboard", permKey: "leaderboard" },
   { id: "settings",    label: "Settings",     icon: "", permKey: "settings" },
 ];
 
