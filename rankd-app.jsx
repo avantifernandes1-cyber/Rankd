@@ -3473,10 +3473,18 @@ function RankdLobbyScreen({ onNav, pin, playerName, playerEmoji, sessionName, ro
     score: 0,
   });
 
+  // ── Debug: log lobby mount state ──────────────────────────────────────────
+  useEffect(() => {
+    console.log("[ralli:lobby] mount — role:", role, "pin:", pin, "sessionDbId:", sessionDbId, "isDemoMode:", isDemoMode, "session:", session ? `found demoMode=${session.demoMode}` : "NOT FOUND in sessions[]");
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Admin: load initial participants from DB ────────────────────────────────
   useEffect(() => {
     if (role !== "admin" || !sessionDbId || isDemoMode) return;
-    getLobbyParticipants(sessionDbId).then(({ data }) => {
+    console.log("[ralli:lobby] loading initial participants from DB for sessionDbId:", sessionDbId);
+    getLobbyParticipants(sessionDbId).then(({ data, error }) => {
+      if (error) console.error("[ralli:lobby] getLobbyParticipants FAILED:", error);
+      else console.log("[ralli:lobby] getLobbyParticipants OK —", data?.length ?? 0, "participants");
       if (data) setDbPlayers(data.map(normParticipant));
     });
   }, [sessionDbId, isDemoMode]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -3485,7 +3493,9 @@ function RankdLobbyScreen({ onNav, pin, playerName, playerEmoji, sessionName, ro
   // Fires immediately when a player calls joinGameSession(), cross-device.
   useEffect(() => {
     if (role !== "admin" || !sessionDbId || isDemoMode) return;
+    console.log("[ralli:lobby] subscribing to realtime participants for sessionDbId:", sessionDbId);
     const channel = subscribeToLobbyParticipants(sessionDbId, (row) => {
+      console.log("[ralli:lobby] realtime INSERT received — player:", row.player_id, row.name);
       setDbPlayers(prev => {
         if (prev.some(p => p.id === row.player_id)) return prev; // already present
         return [...prev, normParticipant(row)];
@@ -12297,16 +12307,22 @@ export default function App() {
 
   const handleCreateSession = async (session) => {
     // Persist to Supabase first — enables cross-device joins by PIN
+    const tenantId = currentOrg?.id ?? user?.orgId ?? null;
+    console.log("[ralli:game] handleCreateSession — PIN:", session.code, "tenantId:", tenantId, "hostId:", user?.id, "demoMode:", session.demoMode ?? false);
     const { data, error } = await createGameSession({
       pin:           session.code,
       name:          session.name,
       quizId:        session.quizId,
       questionCount: session.questionCount,
       demoMode:      session.demoMode ?? false,
-      tenantId:      currentOrg?.id ?? user?.orgId ?? null,
+      tenantId,
       hostId:        user?.id ?? "anonymous",
     });
-    if (error) console.error("[ralli] createGameSession failed:", error);
+    if (error) {
+      console.error("[ralli:game] createGameSession FAILED — RLS or network issue:", error);
+    } else {
+      console.log("[ralli:game] createGameSession OK — dbId:", data?.id, "PIN:", session.code);
+    }
     // Keep local state (screens still read from sessions array)
     setSessions(prev => [{ ...session, dbId: data?.id }, ...prev]);
     setScreen("rankd");
@@ -12319,18 +12335,21 @@ export default function App() {
     let sessionName = sessionNameHint ?? session?.name ?? "Live Game";
     let quizId      = session?.quizId;
 
+    console.log("[ralli:game] handleEnterPin — PIN:", pin, "localSession:", session ? `found (dbId=${session.dbId})` : "not found", "userTenantId:", currentUser?.orgId);
+
     if (!session) {
       // Player is on a different device — fetch session metadata from Supabase
-      const { data: remote } = await findSessionByPin(pin);
+      const { data: remote, error: pinErr } = await findSessionByPin(pin);
+      console.log("[ralli:game] findSessionByPin result — remote:", remote ? `id=${remote.id} tenantId=${remote.tenant_id} status=${remote.status}` : "null", "error:", pinErr);
       if (remote) {
         // Cross-tenant protection: real users can only join their own org's sessions
         if (currentUser?._isReal && remote.tenant_id && remote.tenant_id !== currentUser.orgId) {
-          console.warn("[ralli] handleEnterPin: cross-tenant join blocked");
+          console.warn("[ralli:game] handleEnterPin: cross-tenant join BLOCKED — session.tenantId:", remote.tenant_id, "user.orgId:", currentUser.orgId);
           return;
         }
         // Only allow joining sessions that are actively waiting for players
         if (remote.status && remote.status !== "waiting") {
-          console.warn("[ralli] handleEnterPin: session not accepting players, status:", remote.status);
+          console.warn("[ralli:game] handleEnterPin: session not accepting players, status:", remote.status);
           return;
         }
         const fetched = {
@@ -12347,6 +12366,11 @@ export default function App() {
         setSessions(prev => [...prev, fetched]);
         sessionName = remote.name;
         quizId      = remote.quiz_id;
+        console.log("[ralli:game] fetched session added to local state — dbId:", remote.id);
+      } else if (pinErr) {
+        console.error("[ralli:game] findSessionByPin FAILED — likely RLS blocking authenticated read:", pinErr);
+      } else {
+        console.warn("[ralli:game] findSessionByPin: no session found for PIN", pin, "— check if session was created in DB");
       }
     }
 
@@ -12378,6 +12402,7 @@ export default function App() {
     // Fire-and-forget — lobby navigation doesn't wait for DB write.
     const joiningSession = sessions.find(s => s.code === lobbyPin);
     const sessionDbId    = joiningSession?.dbId ?? null;
+    console.log("[ralli:game] handleEnterName — name:", name, "lobbyPin:", lobbyPin, "sessionDbId:", sessionDbId, "currentUser:", currentUser?.id, "tenantId:", currentUser?.orgId);
     if (sessionDbId && currentUser) {
       const pidx  = Math.abs(playerId.charCodeAt(0) + (playerId.charCodeAt(1) || 0)) % PLAYER_EMOJIS.length;
       const pEmoji = emoji ?? PLAYER_EMOJIS[pidx];
@@ -12388,7 +12413,12 @@ export default function App() {
         emoji:    pEmoji,
         color:    pColor,
         tenantId: currentUser.orgId ?? null,
-      }).catch(e => console.error("[ralli] joinGameSession failed:", e));
+      }).then(({ data: jData, error: jErr }) => {
+        if (jErr) console.error("[ralli:game] joinGameSession FAILED — RLS or schema issue:", jErr);
+        else console.log("[ralli:game] joinGameSession OK — participantId:", jData?.id, "sessionId:", sessionDbId);
+      }).catch(e => console.error("[ralli:game] joinGameSession exception:", e));
+    } else {
+      console.warn("[ralli:game] handleEnterName: skipping joinGameSession —", !sessionDbId ? "sessionDbId is null (session not found in DB)" : "currentUser is null");
     }
 
     setScreen("rankd-lobby");
