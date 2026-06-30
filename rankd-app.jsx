@@ -11958,6 +11958,30 @@ export default function App() {
       });
   }, [currentUser?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Refresh active sessions when user opens the Games screen ─────────────────
+  // Sessions are loaded once at login, but a manager may create a session after
+  // the user has already logged in. This effect re-queries Supabase each time
+  // the user navigates to "rankd" so the active sessions list stays current.
+  // Also polls every 10s while on that screen to pick up newly launched sessions.
+  // Scoped to real users only — demo users use INITIAL_SESSIONS.
+  useEffect(() => {
+    if (screen !== "rankd" || !currentUser?._isReal || !currentUser.orgId) return;
+    const tenantId = currentUser.orgId;
+
+    const refresh = () => {
+      console.log("[ralli:game] refreshing active sessions — tenantId:", tenantId);
+      getActiveSessions(tenantId).then(({ data, error }) => {
+        if (error) console.error("[ralli:game] getActiveSessions error:", error);
+        else console.log("[ralli:game] getActiveSessions OK —", data?.length ?? 0, "sessions (waiting:", data?.filter(s => s.status === "waiting").length ?? 0, ")");
+        if (data) setSessions(data);
+      });
+    };
+
+    refresh(); // immediate on screen entry
+    const interval = setInterval(refresh, 10000); // poll every 10s
+    return () => clearInterval(interval);
+  }, [screen, currentUser?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // BroadcastChannel — only active when a game is running
   const isInGame = ["rankd-lobby", "rankd-game"].includes(screen);
   const { chPlayers, chAnswers, chMsg, broadcast } = useGameChannel(isInGame ? lobbyPin : null, gameRole);
