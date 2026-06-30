@@ -9482,6 +9482,9 @@ function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, on
       if (error) throw error;
       const url = buildInviteUrl(data.token);
       setNewInviteUrl(url);
+      // Fire invite email — non-blocking, invite URL is always the fallback
+      sendInviteEmail({ to: inviteForm.email.trim().toLowerCase(), orgName: localOrg.name, inviteUrl: url, type: "member", role: inviteForm.role })
+        .catch(err => console.warn("[ralli] Member invite email failed:", err.message));
       setInviteForm({ email: "", role: "user" });
       await refreshData(); // reload invitations list
     } catch (err) {
@@ -9510,6 +9513,9 @@ function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, on
       const data = await onResendMemberInvite(inv.id);
       const freshToken = data?.token ?? inv.token;
       setInvitations(prev => prev.map(i => i.id === inv.id ? { ...i, status: "pending", token: freshToken } : i));
+      // Fire email with refreshed token — non-blocking
+      sendInviteEmail({ to: inv.email, orgName: localOrg.name, inviteUrl: buildInviteUrl(freshToken), type: "member", role: inv.role })
+        .catch(err => console.warn("[ralli] Resend invite email failed:", err.message));
     } catch (err) {
       alert(err?.message ?? "Failed to resend invite.");
     } finally {
@@ -9963,7 +9969,10 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
       setInviteUrl(result.inviteUrl);
       setSubmitted(true);
       onMemberInvited?.();
-      refreshInvitations(); // refresh list after new invite
+      refreshInvitations();
+      // Fire invite email — non-blocking, invite URL is always the fallback
+      sendInviteEmail({ to: form.email.trim(), orgName, inviteUrl: result.inviteUrl, type: "member", role: form.role })
+        .catch(err => console.warn("[ralli] Member invite email failed:", err.message));
     } catch (err) {
       setInviteError(err?.message ?? "Failed to create invite. Try again.");
     } finally {
@@ -9990,6 +9999,9 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
       if (error) throw error;
       const freshToken = data?.token ?? inv.token;
       setInvitations(prev => prev.map(i => i.id === inv.id ? { ...i, status: "pending", token: freshToken } : i));
+      // Fire email with refreshed token — non-blocking
+      sendInviteEmail({ to: inv.email, orgName, inviteUrl: buildInviteUrl(freshToken), type: "member", role: inv.role })
+        .catch(err => console.warn("[ralli] Resend invite email failed:", err.message));
     } catch (err) {
       alert(err?.message ?? "Failed to resend invite.");
     } finally {

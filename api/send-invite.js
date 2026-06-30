@@ -4,18 +4,29 @@
  * Sends an invite email via Resend.
  * Keeps RESEND_API_KEY server-side — never exposed to the browser.
  *
- * Body: { to: string, orgName: string, inviteUrl: string }
- * Returns: { success: true } | { error: string }
+ * Body:
+ *   to:        string             — recipient email
+ *   orgName:   string             — tenant/org display name
+ *   inviteUrl: string             — full invite link
+ *   type?:     "admin"|"member"   — controls subject + body copy (default: "admin")
+ *   role?:     string             — recipient role for personalized copy
  *
- * Resend free tier: can only send FROM onboarding@resend.dev until you
- * verify a custom domain at resend.com/domains.
+ * Returns: { success: true, emailId: string } | { error: string }
+ *
+ * Environment variables (set in Vercel dashboard, NOT .env.local):
+ *   RESEND_API_KEY  — required.
+ *   RESEND_FROM     — optional sender address. Defaults to "Ralli <onboarding@resend.dev>".
+ *                     IMPORTANT: onboarding@resend.dev only delivers to the Resend
+ *                     account owner's email on the free plan. To send to any address,
+ *                     verify a domain at resend.com/domains and set:
+ *                     RESEND_FROM=Ralli <invites@runralli.com>
  */
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { to, orgName, inviteUrl } = req.body ?? {};
+  const { to, orgName, inviteUrl, type = "admin", role = "user" } = req.body ?? {};
 
   if (!to || !inviteUrl || !orgName) {
     return res.status(400).json({ error: "Missing required fields: to, orgName, inviteUrl" });
@@ -23,10 +34,17 @@ export default async function handler(req, res) {
 
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
+    console.error("[send-invite] RESEND_API_KEY is not configured in environment");
     return res.status(500).json({ error: "Email service not configured (RESEND_API_KEY missing)" });
   }
 
-  const html = buildEmailHtml({ orgName, inviteUrl, to });
+  const from    = process.env.RESEND_FROM ?? "Ralli <onboarding@resend.dev>";
+  const subject = type === "member"
+    ? `You've been invited to join ${orgName} on Ralli`
+    : `You've been invited to set up ${orgName} on Ralli`;
+  const html    = buildEmailHtml({ orgName, inviteUrl, to, type, role });
+
+  console.info("[send-invite] Attempting email send", { to, orgName, type, role, from, subject, inviteUrl });
 
   try {
     const r = await fetch("https://api.resend.com/emails", {
@@ -35,30 +53,44 @@ export default async function handler(req, res) {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        from: "Ralli <onboarding@resend.dev>",
-        to: [to],
-        subject: `You've been invited to set up ${orgName} on Ralli`,
-        html,
-      }),
+      body: JSON.stringify({ from, to: [to], subject, html }),
     });
 
+    const responseBody = await r.json().catch(() => ({}));
+
     if (!r.ok) {
-      const resendErr = await r.json().catch(() => ({ message: r.statusText }));
-      console.error("[send-invite] Resend error:", resendErr);
-      return res.status(r.status).json({ error: resendErr?.message ?? "Email delivery failed" });
+      console.error("[send-invite] Resend rejected request", {
+        status: r.status,
+        body: responseBody,
+        from,
+        to,
+      });
+      return res.status(r.status).json({
+        error: responseBody?.message ?? `Resend error (HTTP ${r.status})`,
+        resendError: responseBody,
+      });
     }
 
-    return res.status(200).json({ success: true });
+    console.info("[send-invite] Email accepted by Resend", { emailId: responseBody.id, to });
+    return res.status(200).json({ success: true, emailId: responseBody.id ?? null });
   } catch (err) {
-    console.error("[send-invite] Fetch error:", err);
+    console.error("[send-invite] Network or unexpected error", { message: err.message, to });
     return res.status(500).json({ error: err.message ?? "Unknown error" });
   }
 }
 
 // ── Email template ─────────────────────────────────────────────────────────────
 
-function buildEmailHtml({ orgName, inviteUrl, to }) {
+function buildEmailHtml({ orgName, inviteUrl, to, type = "admin", role = "user" }) {
+  const isAdmin  = type !== "member";
+  const heading  = isAdmin
+    ? `You've been invited to set up ${escHtml(orgName)} on Ralli`
+    : `You've been invited to join ${escHtml(orgName)} on Ralli`;
+  const body     = isAdmin
+    ? `A Ralli admin has created your organization and assigned you as the admin. Click the button below to create your account and complete the setup.`
+    : `Your manager has invited you to join <strong>${escHtml(orgName)}</strong> on Ralli — a sales readiness platform for your team. Click the button below to create your account and get started.`;
+  const ctaLabel = isAdmin ? "Accept invitation &rarr;" : "Join your team &rarr;";
+
   return `
 <!DOCTYPE html>
 <html lang="en">
@@ -84,11 +116,10 @@ function buildEmailHtml({ orgName, inviteUrl, to }) {
           <tr>
             <td style="padding:36px 40px 28px;">
               <h1 style="margin:0 0 8px;font-size:20px;font-weight:800;color:#111827;">
-                You've been invited to set up ${escHtml(orgName)} on Ralli
+                ${heading}
               </h1>
               <p style="margin:0 0 28px;font-size:14px;color:#6B7280;line-height:1.6;">
-                A Ralli admin has created your organization and assigned you as the admin.
-                Click the button below to create your account and complete the setup.
+                ${body}
               </p>
 
               <!-- CTA -->
@@ -97,7 +128,7 @@ function buildEmailHtml({ orgName, inviteUrl, to }) {
                   <td style="border-radius:8px;background:#F97316;">
                     <a href="${inviteUrl}" target="_blank"
                        style="display:inline-block;padding:13px 28px;font-size:14px;font-weight:700;color:#FFFFFF;text-decoration:none;border-radius:8px;">
-                      Accept invitation &rarr;
+                      ${ctaLabel}
                     </a>
                   </td>
                 </tr>
