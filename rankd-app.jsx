@@ -9941,6 +9941,64 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
   const [invActionLoading, setInvActionLoading] = useState(null);
   const [showHistory, setShowHistory]     = useState(false);
 
+  // ── Team management ────────────────────────────────────────────────────────
+  const [teams, setTeams]               = useState(null); // null = loading
+  const [showCreateTeam, setShowCreateTeam] = useState(false);
+  const [teamName, setTeamName]         = useState("");
+  const [teamSaving, setTeamSaving]     = useState(false);
+  const [teamError, setTeamError]       = useState(null);
+  const [editTeam, setEditTeam]         = useState(null); // { id, name } being edited
+  const [editTeamName, setEditTeamName] = useState("");
+
+  const loadTeams = async () => {
+    if (!orgId) return;
+    const { data } = await supabase.from("tenant_teams").select("*").eq("tenant_id", orgId).order("created_at");
+    setTeams(data ?? []);
+  };
+
+  useEffect(() => { loadTeams(); }, [orgId]); // eslint-disable-line
+
+  const handleCreateTeam = async (e) => {
+    e.preventDefault();
+    const name = teamName.trim();
+    if (!name) { setTeamError("Team name is required."); return; }
+    setTeamSaving(true); setTeamError(null);
+    try {
+      const { error } = await supabase.from("tenant_teams").insert({ tenant_id: orgId, name });
+      if (error) throw error;
+      setTeamName(""); setShowCreateTeam(false);
+      await loadTeams();
+    } catch (err) {
+      setTeamError(err.message ?? "Failed to create team.");
+    } finally { setTeamSaving(false); }
+  };
+
+  const handleUpdateTeam = async (e) => {
+    e.preventDefault();
+    const name = editTeamName.trim();
+    if (!name || !editTeam) return;
+    setTeamSaving(true);
+    try {
+      const { error } = await supabase.from("tenant_teams").update({ name }).eq("id", editTeam.id);
+      if (error) throw error;
+      setEditTeam(null); setEditTeamName("");
+      await loadTeams();
+    } catch (err) {
+      alert(err.message ?? "Failed to update team.");
+    } finally { setTeamSaving(false); }
+  };
+
+  const handleDeleteTeam = async (team) => {
+    if (!window.confirm(`Delete team "${team.name}"? This cannot be undone.`)) return;
+    try {
+      const { error } = await supabase.from("tenant_teams").delete().eq("id", team.id);
+      if (error) throw error;
+      await loadTeams();
+    } catch (err) {
+      alert(err.message ?? "Failed to delete team.");
+    }
+  };
+
   const refreshInvitations = async () => {
     try {
       const { data, error } = await supabase.rpc("get_my_tenant_invitations");
@@ -10028,6 +10086,92 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
         >
           + Add Member
         </button>
+      </div>
+
+      {/* Teams */}
+      <div style={{ background: C.white, borderRadius: 12, border: `1px solid ${C.border}`, overflow: "hidden" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 20px", borderBottom: (teams?.length || showCreateTeam) ? `1px solid ${C.border}` : "none" }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>
+            Teams {teams === null ? "" : `(${teams.length})`}
+          </div>
+          <button onClick={() => { setShowCreateTeam(p => !p); setTeamName(""); setTeamError(null); }}
+            style={{ padding: "6px 12px", borderRadius: 8, border: "none", background: showCreateTeam ? C.border : C.orange, color: showCreateTeam ? C.text : "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+            {showCreateTeam ? "Cancel" : "+ New Team"}
+          </button>
+        </div>
+
+        {showCreateTeam && (
+          <form onSubmit={handleCreateTeam} style={{ padding: "12px 20px", borderBottom: `1px solid ${C.border}`, background: C.pageBg, display: "flex", gap: 8, alignItems: "flex-start", flexDirection: "column" }}>
+            <div style={{ display: "flex", gap: 8, width: "100%" }}>
+              <input
+                autoFocus
+                value={teamName}
+                onChange={e => setTeamName(e.target.value)}
+                placeholder="e.g. SDR, AE, US SDR, APAC AE"
+                style={{ flex: 1, padding: "8px 10px", borderRadius: 8, border: `1.5px solid ${teamError ? "#ef4444" : C.border}`, fontSize: 13, outline: "none", color: C.text }}
+              />
+              <button type="submit" disabled={teamSaving}
+                style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: C.orange, color: "#fff", fontSize: 12, fontWeight: 700, cursor: teamSaving ? "not-allowed" : "pointer", opacity: teamSaving ? 0.7 : 1, whiteSpace: "nowrap" }}>
+                {teamSaving ? "Creating…" : "Create"}
+              </button>
+            </div>
+            {teamError && <div style={{ fontSize: 11, color: "#ef4444" }}>{teamError}</div>}
+          </form>
+        )}
+
+        {teams === null && (
+          <div style={{ padding: 20, textAlign: "center", color: C.textMuted, fontSize: 13 }}>Loading…</div>
+        )}
+
+        {teams !== null && teams.length === 0 && !showCreateTeam && (
+          <div style={{ padding: "24px 20px", textAlign: "center", color: C.textMuted, fontSize: 13 }}>
+            No teams yet. Create one to organize your members.
+          </div>
+        )}
+
+        {(teams ?? []).map((team, i) => (
+          <div key={team.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 20px", borderBottom: i < (teams.length - 1) ? `1px solid ${C.border}` : "none" }}>
+            {editTeam?.id === team.id ? (
+              <form onSubmit={handleUpdateTeam} style={{ flex: 1, display: "flex", gap: 8 }}>
+                <input
+                  autoFocus
+                  value={editTeamName}
+                  onChange={e => setEditTeamName(e.target.value)}
+                  style={{ flex: 1, padding: "6px 10px", borderRadius: 7, border: `1.5px solid ${C.orange}`, fontSize: 13, outline: "none", color: C.text }}
+                />
+                <button type="submit" disabled={teamSaving}
+                  style={{ padding: "6px 12px", borderRadius: 7, border: "none", background: C.orange, color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                  {teamSaving ? "…" : "Save"}
+                </button>
+                <button type="button" onClick={() => setEditTeam(null)}
+                  style={{ padding: "6px 10px", borderRadius: 7, border: `1px solid ${C.border}`, background: C.white, color: C.text, fontSize: 11, fontWeight: 600, cursor: "pointer" }}>
+                  Cancel
+                </button>
+              </form>
+            ) : (
+              <>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{team.name}</div>
+                  {team.is_default && (
+                    <div style={{ fontSize: 11, color: C.textMuted }}>Default team</div>
+                  )}
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button onClick={() => { setEditTeam(team); setEditTeamName(team.name); }}
+                    style={{ padding: "5px 10px", borderRadius: 7, border: `1px solid ${C.border}`, background: C.white, color: C.text, fontSize: 11, fontWeight: 600, cursor: "pointer" }}>
+                    Edit
+                  </button>
+                  {!team.is_default && (
+                    <button onClick={() => handleDeleteTeam(team)}
+                      style={{ padding: "5px 10px", borderRadius: 7, border: "1px solid #fca5a5", background: "#fef2f2", color: "#ef4444", fontSize: 11, fontWeight: 600, cursor: "pointer" }}>
+                      Delete
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        ))}
       </div>
 
       {/* Members list */}
@@ -11310,6 +11454,23 @@ export default function App() {
     });
   }, [currentUser?.id, currentUser?._isReal]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Load orgAdmin's own tenant into orgs[] ────────────────────────────────
+  // Root cause fix: both login paths only fetched tenant.status, never the full row.
+  // Without this, orgs.find(o => o.id === user.orgId) returns null → currentOrg = null
+  // → userPlan = "demo" → Starter nav items hidden.
+  // This effect fires on every login (session restore or fresh login) and ensures
+  // the orgAdmin's tenant is always present in orgs[] with its real plan.
+  useEffect(() => {
+    if (!currentUser?._isReal || currentUser.role !== "orgAdmin" || !currentUser.orgId) return;
+    if (orgs.find(o => o.id === currentUser.orgId)) return; // already loaded
+    supabase.from("tenants").select("*").eq("id", currentUser.orgId).single()
+      .then(({ data: t }) => {
+        if (!t) return;
+        const norm = { ...t, adminEmail: t.admin_email, seatLimit: t.seat_limit ?? 10, seats: t.seat_limit ?? 10, createdAt: t.created_at?.split("T")[0], updatedAt: t.updated_at?.split("T")[0] };
+        setOrgs(prev => [norm, ...prev.filter(o => o.id !== t.id)]);
+      });
+  }, [currentUser?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // BroadcastChannel — only active when a game is running
   const isInGame = ["rankd-lobby", "rankd-game"].includes(screen);
   const { chPlayers, chAnswers, chMsg, broadcast } = useGameChannel(isInGame ? lobbyPin : null, gameRole);
@@ -11740,7 +11901,18 @@ export default function App() {
 
   const renderScreen = () => {
     switch (screen) {
-      case "org-setup":         return <OrgSetupScreen user={user} onComplete={() => setScreen("team")} />;
+      case "org-setup":         return <OrgSetupScreen user={user} onComplete={() => {
+        // Refresh tenant after setup so currentOrg reflects "active" status and real plan
+        if (user.orgId) {
+          supabase.from("tenants").select("*").eq("id", user.orgId).single()
+            .then(({ data: t }) => {
+              if (!t) return;
+              const norm = { ...t, adminEmail: t.admin_email, seatLimit: t.seat_limit ?? 10, seats: t.seat_limit ?? 10, createdAt: t.created_at?.split("T")[0], updatedAt: t.updated_at?.split("T")[0] };
+              setOrgs([norm]);
+            });
+        }
+        setScreen("team");
+      }} />;
       case "home":              return isOrgAdmin
         ? <TeamScreen orgId={user.orgId} orgName={currentOrg?.name ?? "Your Team"} orgUsers={orgUsers} onAddUser={handleAddUser} />
         : <HomeScreen user={user} onNav={navigate} quizAssignments={USER_QUIZ_ASSIGNMENTS_SEED} onResumeLesson={(id) => { setPendingLessonId(id); navigate("learn"); }} onStartQuiz={(id) => { setPendingQuizId(id); navigate("quizzes"); }} />;
