@@ -8541,7 +8541,7 @@ function LeaderboardScreen({ currentUser }) {
 // ── LOGIN SCREEN ───────────────────────────────────────────
 
 // ── ORGANIZATIONS SCREEN (super admin only) ────────────────
-function OrganizationsScreen({ orgs, onInviteOrg, onSelectOrg, onRefresh, onDeactivateOrg, onReactivateOrg, onDeleteOrg }) {
+function OrganizationsScreen({ orgs, onInviteOrg, onSelectOrg, onRefresh, onDeactivateOrg, onReactivateOrg, onDeleteOrg, onCancelOrg }) {
   const [showInvite, setShowInvite] = useState(false);
   const [form, setForm] = useState({ name: "", adminEmail: "", domain: "", plan: "Starter", seats: 10 });
   const [submitted, setSubmitted] = useState(false);
@@ -8598,11 +8598,13 @@ function OrganizationsScreen({ orgs, onInviteOrg, onSelectOrg, onRefresh, onDeac
   };
 
   const [confirmDelete, setConfirmDelete] = useState(null); // org to confirm deletion
+  const [confirmCancel, setConfirmCancel] = useState(null); // org to confirm cancel
   const [actionLoading, setActionLoading] = useState(null); // orgId currently being actioned
 
   const handleOrgAction = async (action, org, e) => {
     e.stopPropagation();
-    if (action === "delete") { setConfirmDelete(org); return; }
+    if (action === "delete")  { setConfirmDelete(org); return; }
+    if (action === "cancel")  { setConfirmCancel(org); return; }
     setActionLoading(org.id);
     try {
       if (action === "deactivate") await onDeactivateOrg(org.id);
@@ -8627,6 +8629,19 @@ function OrganizationsScreen({ orgs, onInviteOrg, onSelectOrg, onRefresh, onDeac
     }
   };
 
+  const handleConfirmCancel = async () => {
+    if (!confirmCancel) return;
+    setActionLoading(confirmCancel.id);
+    try {
+      await onCancelOrg(confirmCancel.id);
+      setConfirmCancel(null);
+    } catch (err) {
+      alert(err?.message ?? "Cancel failed");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const planColors = { Starter: C.blue, Growth: C.orange, Enterprise: C.purple };
   const statusColors = {
     active:        C.green,
@@ -8636,6 +8651,7 @@ function OrganizationsScreen({ orgs, onInviteOrg, onSelectOrg, onRefresh, onDeac
     onboarding:    C.purple,
     suspended:     "#ef4444",
     canceled:      C.textMuted,
+    deleted:       C.textMuted,
   };
 
   return (
@@ -8711,25 +8727,38 @@ function OrganizationsScreen({ orgs, onInviteOrg, onSelectOrg, onRefresh, onDeac
             <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 6, background: (planColors[org.plan] ?? C.blue) + "18", color: planColors[org.plan] ?? C.blue, flexShrink: 0 }}>{org.plan}</span>
             <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 6, background: (statusColors[org.status] ?? C.textMuted) + "20", color: statusColors[org.status] ?? C.textMuted, flexShrink: 0 }}>{org.status}</span>
 
-            {/* Actions */}
+            {/* Actions — shown based on current status */}
             <div style={{ display: "flex", gap: 6, flexShrink: 0 }} onClick={e => e.stopPropagation()}>
               <button
                 onClick={() => onSelectOrg(org)}
                 style={{ padding: "5px 10px", borderRadius: 6, border: `1px solid ${C.border}`, background: C.white, color: C.text, fontSize: 11, fontWeight: 600, cursor: "pointer" }}
               >View</button>
-              {org.status === "suspended" ? (
+
+              {/* Reactivate: suspended or canceled orgs */}
+              {["suspended","canceled"].includes(org.status) ? (
                 <button
                   onClick={e => handleOrgAction("reactivate", org, e)}
                   disabled={actionLoading === org.id}
                   style={{ padding: "5px 10px", borderRadius: 6, border: `1px solid ${C.green}`, background: C.green + "15", color: C.green, fontSize: 11, fontWeight: 700, cursor: "pointer" }}
                 >{actionLoading === org.id ? "…" : "Reactivate"}</button>
               ) : (
+                /* Suspend: active / onboarding / invited */
                 <button
                   onClick={e => handleOrgAction("deactivate", org, e)}
                   disabled={actionLoading === org.id}
                   style={{ padding: "5px 10px", borderRadius: 6, border: `1px solid ${C.border}`, background: C.white, color: C.textSub, fontSize: 11, fontWeight: 600, cursor: "pointer" }}
                 >{actionLoading === org.id ? "…" : "Suspend"}</button>
               )}
+
+              {/* Cancel: only for non-canceled, non-deleted orgs */}
+              {!["canceled","deleted"].includes(org.status) && (
+                <button
+                  onClick={e => handleOrgAction("cancel", org, e)}
+                  disabled={actionLoading === org.id}
+                  style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid #fbbf24", background: "#fffbeb", color: "#b45309", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                >Cancel</button>
+              )}
+
               <button
                 onClick={e => handleOrgAction("delete", org, e)}
                 disabled={actionLoading === org.id}
@@ -8761,6 +8790,32 @@ function OrganizationsScreen({ orgs, onInviteOrg, onSelectOrg, onRefresh, onDeac
                 disabled={actionLoading === confirmDelete.id}
                 style={{ flex: 1, padding: "11px", borderRadius: 10, border: "none", background: "#ef4444", color: "#fff", fontSize: 13, fontWeight: 700, cursor: actionLoading ? "not-allowed" : "pointer", opacity: actionLoading ? 0.7 : 1 }}
               >{actionLoading === confirmDelete.id ? "Deleting…" : "Yes, delete"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Cancel confirmation modal */}
+      {confirmCancel && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1001 }}
+          onClick={e => { if (e.target === e.currentTarget) setConfirmCancel(null); }}
+        >
+          <div style={{ background: C.white, borderRadius: 16, padding: 32, width: 400, boxShadow: "0 24px 64px rgba(0,0,0,0.25)" }}>
+            <div style={{ fontSize: 32, marginBottom: 12, textAlign: "center" }}>⛔</div>
+            <h3 style={{ margin: "0 0 8px", fontSize: 17, fontWeight: 800, color: C.text, textAlign: "center" }}>Cancel {confirmCancel.name}?</h3>
+            <p style={{ margin: "0 0 24px", fontSize: 13, color: C.textSub, textAlign: "center", lineHeight: 1.6 }}>
+              This marks the organization as <strong>canceled</strong>. Members will lose access. The org can be reactivated later if needed.
+            </p>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button
+                onClick={() => setConfirmCancel(null)}
+                style={{ flex: 1, padding: "11px", borderRadius: 10, border: `1px solid ${C.border}`, background: C.white, color: C.text, fontSize: 13, fontWeight: 700, cursor: "pointer" }}
+              >Keep Active</button>
+              <button
+                onClick={handleConfirmCancel}
+                disabled={actionLoading === confirmCancel.id}
+                style={{ flex: 1, padding: "11px", borderRadius: 10, border: "none", background: "#b45309", color: "#fff", fontSize: 13, fontWeight: 700, cursor: actionLoading ? "not-allowed" : "pointer", opacity: actionLoading ? 0.7 : 1 }}
+              >{actionLoading === confirmCancel.id ? "Canceling…" : "Yes, cancel org"}</button>
             </div>
           </div>
         </div>
@@ -9208,12 +9263,13 @@ function OrgSetupScreen({ user, onComplete }) {
 
 // ── ORG DETAIL SCREEN (ralli admin only) ─────────────────────────────────────
 // Full lifecycle: view, edit, manage members, manage invitations.
-function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, onReactivateOrg, onDeleteOrg, onUpdateOrg, onUpdateMember, onRemoveMember, onCancelInvite, onResendMemberInvite }) {
+function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, onReactivateOrg, onDeleteOrg, onCancelOrg, onUpdateOrg, onUpdateMember, onRemoveMember, onCancelInvite, onResendMemberInvite }) {
   const [realMembers, setRealMembers]   = useState(null);   // profiles[]
   const [invitations, setInvitations]   = useState(null);   // all tenant_invitations[]
   const [localOrg, setLocalOrg]         = useState(org);    // optimistic local copy
   const [actionLoading, setActionLoading] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmCancel, setConfirmCancel] = useState(false);
 
   // Edit org state
   const [showEdit, setShowEdit]       = useState(false);
@@ -9306,6 +9362,19 @@ function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, on
     }
   };
 
+  const handleCancel = async () => {
+    setActionLoading("cancel");
+    try {
+      await onCancelOrg(localOrg.id);
+      setLocalOrg(prev => ({ ...prev, status: "canceled" }));
+      setConfirmCancel(false);
+    } catch (err) {
+      alert(err?.message ?? "Failed to cancel organization");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   // ── Edit org ──────────────────────────────────────────────────────────────
   const openEdit = () => {
     setEditForm({
@@ -9355,7 +9424,7 @@ function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, on
   // ── Member management ─────────────────────────────────────────────────────
   const openEditMember = (member) => {
     setEditMember(member);
-    setEditMemberForm({ name: member.name ?? "", role: member.role ?? "user" });
+    setEditMemberForm({ name: member.name ?? "", role: member.role ?? "user", status: member.status ?? "active" });
     setMemberError(null);
   };
 
@@ -9365,11 +9434,15 @@ function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, on
     setMemberError(null);
     try {
       await onUpdateMember(editMember.id, {
-        name: editMemberForm.name || null,
-        role: editMemberForm.role || null,
+        name:   editMemberForm.name   || null,
+        role:   editMemberForm.role   || null,
+        status: editMemberForm.status || null,
       });
       setRealMembers(prev => prev.map(m => m.id === editMember.id ? {
-        ...m, name: editMemberForm.name || m.name, role: editMemberForm.role || m.role
+        ...m,
+        name:   editMemberForm.name   || m.name,
+        role:   editMemberForm.role   || m.role,
+        status: editMemberForm.status || m.status,
       } : m));
       setEditMember(null);
     } catch (err) {
@@ -9444,7 +9517,18 @@ function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, on
   };
 
   const members = realMembers ?? orgUsers.filter(u => u.orgId === localOrg.id);
-  const statusColor = { active: C.green, suspended: "#ef4444", invited: C.orange, onboarding: C.orange, canceled: C.textMuted };
+  const statusColor = {
+    active:        C.green,
+    "live-active": C.green,
+    "live-trial":  C.green,
+    invited:       C.blue,
+    "invite sent": C.blue,
+    onboarding:    C.purple,
+    suspended:     "#ef4444",
+    canceled:      C.textMuted,
+    deleted:       C.textMuted,
+    inactive:      C.textMuted,
+  };
   const ROLE_LABELS = { user: "Rep", manager: "Manager", orgAdmin: "Org Admin", ralli_admin: "Ralli Admin" };
 
   return (
@@ -9465,16 +9549,27 @@ function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, on
           <button onClick={openEdit} disabled={!!actionLoading} style={{ padding: "8px 14px", borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.text, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
             Edit
           </button>
-          {localOrg.status === "suspended" ? (
-            <button onClick={handleReactivate} disabled={!!actionLoading} style={{ padding: "8px 14px", borderRadius: 8, border: `1px solid ${C.green}`, background: C.green + "15", color: C.green, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+
+          {/* Reactivate: for suspended or canceled orgs */}
+          {["suspended","canceled"].includes(localOrg.status) ? (
+            <button onClick={handleReactivate} disabled={!!actionLoading} style={{ padding: "8px 14px", borderRadius: 8, border: `1px solid ${C.green}`, background: C.green + "15", color: C.green, fontSize: 12, fontWeight: 700, cursor: actionLoading ? "not-allowed" : "pointer", opacity: actionLoading ? 0.6 : 1 }}>
               {actionLoading === "reactivate" ? "…" : "Reactivate"}
             </button>
           ) : (
-            <button onClick={handleSuspend} disabled={!!actionLoading} style={{ padding: "8px 14px", borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.textSub, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+            /* Suspend: for active / onboarding / invited */
+            <button onClick={handleSuspend} disabled={!!actionLoading} style={{ padding: "8px 14px", borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.textSub, fontSize: 12, fontWeight: 600, cursor: actionLoading ? "not-allowed" : "pointer", opacity: actionLoading ? 0.6 : 1 }}>
               {actionLoading === "suspend" ? "…" : "Suspend"}
             </button>
           )}
-          <button onClick={() => setConfirmDelete(true)} disabled={!!actionLoading} style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid #fca5a5", background: "#fef2f2", color: "#ef4444", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+
+          {/* Cancel: only when org is not already canceled */}
+          {!["canceled","deleted"].includes(localOrg.status) && (
+            <button onClick={() => setConfirmCancel(true)} disabled={!!actionLoading} style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid #fbbf24", background: "#fffbeb", color: "#b45309", fontSize: 12, fontWeight: 700, cursor: actionLoading ? "not-allowed" : "pointer", opacity: actionLoading ? 0.6 : 1 }}>
+              Cancel Org
+            </button>
+          )}
+
+          <button onClick={() => setConfirmDelete(true)} disabled={!!actionLoading} style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid #fca5a5", background: "#fef2f2", color: "#ef4444", fontSize: 12, fontWeight: 700, cursor: actionLoading ? "not-allowed" : "pointer", opacity: actionLoading ? 0.6 : 1 }}>
             Delete Org
           </button>
         </div>
@@ -9652,6 +9747,15 @@ function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, on
                       <option value="orgAdmin">Org Admin</option>
                     </select>
                   </div>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ display: "block", fontSize: 10, fontWeight: 700, color: C.textSub, letterSpacing: "0.06em", marginBottom: 4 }}>STATUS</label>
+                    <select value={editMemberForm.status} onChange={e => setEditMemberForm(p => ({ ...p, status: e.target.value }))}
+                      style={{ width: "100%", padding: "7px 10px", borderRadius: 8, border: `1.5px solid ${C.border}`, fontSize: 13, color: C.text, background: C.white, outline: "none" }}>
+                      <option value="active">Active</option>
+                      <option value="suspended">Suspended</option>
+                      <option value="inactive">Inactive</option>
+                    </select>
+                  </div>
                   <button type="submit" disabled={memberSaving}
                     style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: C.orange, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
                     {memberSaving ? "Saving…" : "Save"}
@@ -9756,9 +9860,29 @@ function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, on
               Permanently removes the organization and all its data. Existing users will be unlinked. This cannot be undone.
             </p>
             <div style={{ display: "flex", gap: 10 }}>
-              <button onClick={() => setConfirmDelete(false)} style={{ flex: 1, padding: "11px", borderRadius: 10, border: `1px solid ${C.border}`, background: C.white, color: C.text, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
+              <button onClick={() => setConfirmDelete(false)} style={{ flex: 1, padding: "11px", borderRadius: 10, border: `1px solid ${C.border}`, background: C.white, color: C.text, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Keep</button>
               <button onClick={handleDelete} disabled={actionLoading === "delete"} style={{ flex: 1, padding: "11px", borderRadius: 10, border: "none", background: "#ef4444", color: "#fff", fontSize: 13, fontWeight: 700, cursor: actionLoading ? "not-allowed" : "pointer", opacity: actionLoading ? 0.7 : 1 }}>
                 {actionLoading === "delete" ? "Deleting…" : "Yes, delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Cancel org confirmation modal */}
+      {confirmCancel && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1001 }}
+          onClick={e => { if (e.target === e.currentTarget) setConfirmCancel(false); }}>
+          <div style={{ background: C.white, borderRadius: 16, padding: 32, width: 400, boxShadow: "0 24px 64px rgba(0,0,0,0.25)" }}>
+            <div style={{ fontSize: 32, marginBottom: 12, textAlign: "center" }}>⛔</div>
+            <h3 style={{ margin: "0 0 8px", fontSize: 17, fontWeight: 800, color: C.text, textAlign: "center" }}>Cancel {localOrg.name}?</h3>
+            <p style={{ margin: "0 0 24px", fontSize: 13, color: C.textSub, textAlign: "center", lineHeight: 1.6 }}>
+              Marks this organization as <strong>canceled</strong>. Members lose access immediately. The org can be reactivated later.
+            </p>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={() => setConfirmCancel(false)} style={{ flex: 1, padding: "11px", borderRadius: 10, border: `1px solid ${C.border}`, background: C.white, color: C.text, fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Keep Active</button>
+              <button onClick={handleCancel} disabled={actionLoading === "cancel"} style={{ flex: 1, padding: "11px", borderRadius: 10, border: "none", background: "#b45309", color: "#fff", fontSize: 13, fontWeight: 700, cursor: actionLoading ? "not-allowed" : "pointer", opacity: actionLoading ? 0.7 : 1 }}>
+                {actionLoading === "cancel" ? "Canceling…" : "Yes, cancel org"}
               </button>
             </div>
           </div>
@@ -11117,23 +11241,45 @@ export default function App() {
       .then(({ data }) => { if (data?.length) setOrgs(data.map(t => ({ ...t, adminEmail: t.admin_email, seatLimit: t.seat_limit ?? 10, seats: t.seat_limit ?? 10, createdAt: t.created_at?.split("T")[0], updatedAt: t.updated_at?.split("T")[0] }))); });
   };
 
+  // UUID guard — seed/demo orgs have string IDs like "org_momence" which Postgres rejects as uuid type
+  const isRealTenantId = id => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
   const handleDeactivateOrg = async (orgId) => {
+    if (!isRealTenantId(orgId)) throw new Error("This organization is a demo record and cannot be modified.");
     const { error } = await supabase.rpc("deactivate_tenant", { p_tenant_id: orgId });
     if (error) { console.error("[ralli] deactivate_tenant failed:", error); throw error; }
     setOrgs(prev => prev.map(o => o.id === orgId ? { ...o, status: "suspended" } : o));
   };
 
   const handleReactivateOrg = async (orgId) => {
+    if (!isRealTenantId(orgId)) throw new Error("This organization is a demo record and cannot be modified.");
     const { error } = await supabase.rpc("reactivate_tenant", { p_tenant_id: orgId });
     if (error) { console.error("[ralli] reactivate_tenant failed:", error); throw error; }
     setOrgs(prev => prev.map(o => o.id === orgId ? { ...o, status: "active" } : o));
   };
 
   const handleDeleteOrg = async (orgId) => {
+    if (!isRealTenantId(orgId)) throw new Error("This organization is a demo record and cannot be deleted.");
     const { error } = await supabase.rpc("delete_tenant", { p_tenant_id: orgId });
     if (error) { console.error("[ralli] delete_tenant failed:", error); throw error; }
     setOrgs(prev => prev.filter(o => o.id !== orgId));
     if (selectedOrg?.id === orgId) setSelectedOrg(null);
+  };
+
+  // Cancel org — sets status to 'canceled' (distinct from suspended; not reversible to active without deliberate reactivation)
+  const handleCancelOrg = async (orgId) => {
+    if (!isRealTenantId(orgId)) throw new Error("This organization is a demo record and cannot be modified.");
+    const { error } = await supabase.rpc("update_tenant", {
+      p_tenant_id:   orgId,
+      p_name:        null,
+      p_plan:        null,
+      p_seat_limit:  null,
+      p_status:      "canceled",
+      p_domain:      null,
+      p_admin_email: null,
+    });
+    if (error) { console.error("[ralli] cancel_org failed:", error); throw error; }
+    setOrgs(prev => prev.map(o => o.id === orgId ? { ...o, status: "canceled" } : o));
   };
 
   const handleUpdateOrg = async (orgId, fields) => {
@@ -11458,8 +11604,8 @@ export default function App() {
         : <ProgressScreen />;
       case "leaderboard":       return <LeaderboardScreen currentUser={user} />;
       case "organizations":     return selectedOrg
-        ? <OrgDetailScreen org={selectedOrg} orgUsers={orgUsers} onBack={() => setSelectedOrg(null)} onAddUser={handleAddUser} onDeactivateOrg={handleDeactivateOrg} onReactivateOrg={handleReactivateOrg} onDeleteOrg={handleDeleteOrg} onUpdateOrg={handleUpdateOrg} onUpdateMember={handleUpdateMember} onRemoveMember={handleRemoveMember} onCancelInvite={handleCancelInvite} onResendMemberInvite={handleResendMemberInvite} />
-        : <OrganizationsScreen orgs={orgs} onInviteOrg={handleInviteOrg} onSelectOrg={(org) => setSelectedOrg(org)} onRefresh={handleRefreshOrgs} onDeactivateOrg={handleDeactivateOrg} onReactivateOrg={handleReactivateOrg} onDeleteOrg={handleDeleteOrg} />;
+        ? <OrgDetailScreen org={selectedOrg} orgUsers={orgUsers} onBack={() => setSelectedOrg(null)} onAddUser={handleAddUser} onDeactivateOrg={handleDeactivateOrg} onReactivateOrg={handleReactivateOrg} onDeleteOrg={handleDeleteOrg} onCancelOrg={handleCancelOrg} onUpdateOrg={handleUpdateOrg} onUpdateMember={handleUpdateMember} onRemoveMember={handleRemoveMember} onCancelInvite={handleCancelInvite} onResendMemberInvite={handleResendMemberInvite} />
+        : <OrganizationsScreen orgs={orgs} onInviteOrg={handleInviteOrg} onSelectOrg={(org) => setSelectedOrg(org)} onRefresh={handleRefreshOrgs} onDeactivateOrg={handleDeactivateOrg} onReactivateOrg={handleReactivateOrg} onDeleteOrg={handleDeleteOrg} onCancelOrg={handleCancelOrg} />;
       case "team":              return <TeamScreen orgId={user.orgId} orgName={currentOrg?.name ?? "Your Team"} orgUsers={orgUsers} onAddUser={handleAddUser} />;
       case "settings":
         if (isSuperAdmin)  return <RoleAccessScreen rolePermissions={rolePermissions} onSave={handleSaveRolePermissions} currentOrg={currentOrg} />;
