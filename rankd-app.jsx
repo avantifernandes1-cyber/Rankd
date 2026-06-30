@@ -11155,8 +11155,9 @@ export default function App() {
       setCurrentUser(u);
       if (isRalliAdmin(u.role)) {
         setScreen("organizations");
+        setOrgs([]); // clear seed/mock orgs immediately — ralli admin sees only real tenants
         supabase.from("tenants").select("*").order("created_at", { ascending: false })
-          .then(({ data }) => { if (data?.length) setOrgs(data.map(t => ({ ...t, adminEmail: t.admin_email, seatLimit: t.seat_limit ?? 10, seats: t.seat_limit ?? 10, createdAt: t.created_at?.split("T")[0], updatedAt: t.updated_at?.split("T")[0] }))); });
+          .then(({ data }) => { setOrgs(data ? data.map(t => ({ ...t, adminEmail: t.admin_email, seatLimit: t.seat_limit ?? 10, seats: t.seat_limit ?? 10, createdAt: t.created_at?.split("T")[0], updatedAt: t.updated_at?.split("T")[0] })) : []); });
       } else if (u.role === "orgAdmin") {
         if (u._isReal) {
           // Real org admin from Supabase — check tenant status
