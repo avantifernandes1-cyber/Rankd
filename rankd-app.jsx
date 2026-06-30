@@ -9319,6 +9319,7 @@ function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, on
 
   const adminInvite = invitations?.find(i => i.role === "orgAdmin" || i.role === "superadmin") ?? null;
   const memberInvites = (invitations ?? []).filter(i => !["orgAdmin","superadmin"].includes(i.role) && !["accepted","canceled"].includes(i.status));
+  const memberInviteHistory = (invitations ?? []).filter(i => !["orgAdmin","superadmin"].includes(i.role) && ["accepted","canceled"].includes(i.status));
 
   const handleResendAdminEmail = async () => {
     if (!adminInvite) return;
@@ -9829,6 +9830,33 @@ function OrgDetailScreen({ org, orgUsers, onBack, onAddUser, onDeactivateOrg, on
         </div>
       )}
 
+      {/* Invite history (accepted + canceled) */}
+      {memberInviteHistory.length > 0 && (
+        <div style={{ background: C.white, borderRadius: 12, border: `1px solid ${C.border}`, overflow: "hidden" }}>
+          <div style={{ padding: "14px 20px", borderBottom: `1px solid ${C.border}` }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>Invite History ({memberInviteHistory.length})</div>
+          </div>
+          {memberInviteHistory.map((inv, i) => {
+            const statusColor = inv.status === "accepted" ? C.green : C.textMuted;
+            return (
+              <div key={inv.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 20px", borderBottom: i < memberInviteHistory.length - 1 ? `1px solid ${C.border}` : "none" }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{inv.email}</div>
+                  <div style={{ fontSize: 11, color: C.textSub }}>
+                    {ROLE_LABELS[inv.role] ?? inv.role}
+                    {inv.acceptedAt ? ` · Accepted ${new Date(inv.acceptedAt).toLocaleDateString()}` : ""}
+                    {inv.createdAt ? ` · Invited ${new Date(inv.createdAt).toLocaleDateString()}` : ""}
+                  </div>
+                </div>
+                <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 6, background: statusColor + "18", color: statusColor }}>
+                  {inv.status}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* Remove member confirmation modal */}
       {confirmRemove && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1001 }}
@@ -9902,6 +9930,25 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
   const [inviteLoading, setInviteLoading] = useState(false);
   const [inviteError, setInviteError]     = useState(null);
 
+  // Persistent invite list
+  const [invitations, setInvitations]     = useState(null); // null = loading
+  const [invActionLoading, setInvActionLoading] = useState(null);
+  const [showHistory, setShowHistory]     = useState(false);
+
+  const refreshInvitations = async () => {
+    try {
+      const { data, error } = await supabase.rpc("get_my_tenant_invitations");
+      if (error) throw error;
+      const arr = Array.isArray(data) ? data : (typeof data === "string" ? JSON.parse(data) : data ?? []);
+      setInvitations(arr);
+    } catch (err) {
+      console.error("[TeamScreen] load invitations failed:", err);
+      setInvitations([]);
+    }
+  };
+
+  useEffect(() => { if (orgId) refreshInvitations(); }, [orgId]);
+
   const resetModal = () => {
     setShowAdd(false); setSubmitted(false); setInviteUrl(null);
     setInviteError(null); setForm({ email: "", role: "user" });
@@ -9915,13 +9962,43 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
       const result = await createMemberInvite(form.email.trim(), form.role);
       setInviteUrl(result.inviteUrl);
       setSubmitted(true);
-      onMemberInvited?.(); // signal parent to refresh the members list
+      onMemberInvited?.();
+      refreshInvitations(); // refresh list after new invite
     } catch (err) {
       setInviteError(err?.message ?? "Failed to create invite. Try again.");
     } finally {
       setInviteLoading(false);
     }
   };
+
+  const handleCancelInvite = async (invId) => {
+    setInvActionLoading("cancel_" + invId);
+    try {
+      await supabase.rpc("cancel_member_invite", { p_invitation_id: invId });
+      setInvitations(prev => prev.map(i => i.id === invId ? { ...i, status: "canceled" } : i));
+    } catch (err) {
+      alert(err?.message ?? "Failed to cancel invite.");
+    } finally {
+      setInvActionLoading(null);
+    }
+  };
+
+  const handleResendInvite = async (inv) => {
+    setInvActionLoading("resend_" + inv.id);
+    try {
+      const { data, error } = await supabase.rpc("resend_member_invite", { p_invitation_id: inv.id });
+      if (error) throw error;
+      const freshToken = data?.token ?? inv.token;
+      setInvitations(prev => prev.map(i => i.id === inv.id ? { ...i, status: "pending", token: freshToken } : i));
+    } catch (err) {
+      alert(err?.message ?? "Failed to resend invite.");
+    } finally {
+      setInvActionLoading(null);
+    }
+  };
+
+  const pendingInvites  = (invitations ?? []).filter(i => !["accepted","canceled"].includes(i.status));
+  const historyInvites  = (invitations ?? []).filter(i =>  ["accepted","canceled"].includes(i.status));
 
   const roleColors = { user: C.orange, orgAdmin: C.green, superadmin: C.purple };
   const roleLabels = { user: "Rep", orgAdmin: "Manager", superadmin: "Super Admin" };
@@ -9971,6 +10048,81 @@ function TeamScreen({ orgId, orgName, orgUsers, onAddUser, onMemberInvited }) {
           </div>
         ))}
       </div>
+
+      {/* Pending invitations */}
+      {pendingInvites.length > 0 && (
+        <div style={{ background: C.white, borderRadius: 12, border: `1px solid ${C.border}`, overflow: "hidden" }}>
+          <div style={{ padding: "14px 20px", borderBottom: `1px solid ${C.border}` }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>Pending Invitations ({pendingInvites.length})</div>
+          </div>
+          {pendingInvites.map((inv, i) => {
+            const isExpired = inv.expiresAt && new Date(inv.expiresAt) < new Date();
+            const url = buildInviteUrl(inv.token);
+            const isCanceling = invActionLoading === "cancel_" + inv.id;
+            const isResending = invActionLoading === "resend_" + inv.id;
+            const ROLE_LABELS = { user: "Rep", orgAdmin: "Manager", superadmin: "Super Admin" };
+            return (
+              <div key={inv.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "13px 20px", borderBottom: i < pendingInvites.length - 1 ? `1px solid ${C.border}` : "none" }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{inv.email}</div>
+                  <div style={{ fontSize: 11, color: C.textSub }}>
+                    {ROLE_LABELS[inv.role] ?? inv.role} ·{" "}
+                    {isExpired
+                      ? <span style={{ color: "#ef4444" }}>Expired</span>
+                      : inv.expiresAt ? `Expires ${new Date(inv.expiresAt).toLocaleDateString()}` : "No expiry"}
+                  </div>
+                </div>
+                <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 6, background: isExpired ? C.muted : C.orange + "18", color: isExpired ? C.textSub : C.orange }}>
+                  {isExpired ? "expired" : inv.status}
+                </span>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button onClick={() => navigator.clipboard.writeText(url)}
+                    style={{ padding: "5px 10px", borderRadius: 7, border: `1px solid ${C.border}`, background: C.white, color: C.text, fontSize: 11, fontWeight: 600, cursor: "pointer" }}>
+                    Copy Link
+                  </button>
+                  <button onClick={() => handleResendInvite(inv)} disabled={!!invActionLoading}
+                    style={{ padding: "5px 10px", borderRadius: 7, border: `1px solid ${C.border}`, background: C.white, color: C.text, fontSize: 11, fontWeight: 600, cursor: invActionLoading ? "not-allowed" : "pointer", opacity: isResending ? 0.6 : 1 }}>
+                    {isResending ? "…" : "Resend"}
+                  </button>
+                  <button onClick={() => handleCancelInvite(inv.id)} disabled={!!invActionLoading}
+                    style={{ padding: "5px 10px", borderRadius: 7, border: "1px solid #fca5a5", background: "#fef2f2", color: "#ef4444", fontSize: 11, fontWeight: 600, cursor: invActionLoading ? "not-allowed" : "pointer", opacity: isCanceling ? 0.6 : 1 }}>
+                    {isCanceling ? "…" : "Cancel"}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Invite history */}
+      {historyInvites.length > 0 && (
+        <div style={{ background: C.white, borderRadius: 12, border: `1px solid ${C.border}`, overflow: "hidden" }}>
+          <button onClick={() => setShowHistory(p => !p)}
+            style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 20px", background: "none", border: "none", cursor: "pointer", textAlign: "left" }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>Invite History ({historyInvites.length})</div>
+            <span style={{ fontSize: 12, color: C.textSub }}>{showHistory ? "▲ Hide" : "▼ Show"}</span>
+          </button>
+          {showHistory && historyInvites.map((inv, i) => {
+            const ROLE_LABELS = { user: "Rep", orgAdmin: "Manager", superadmin: "Super Admin" };
+            const statusColor = inv.status === "accepted" ? C.green : C.textMuted;
+            return (
+              <div key={inv.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 20px", borderTop: `1px solid ${C.border}` }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{inv.email}</div>
+                  <div style={{ fontSize: 11, color: C.textSub }}>
+                    {ROLE_LABELS[inv.role] ?? inv.role}
+                    {inv.acceptedAt ? ` · Accepted ${new Date(inv.acceptedAt).toLocaleDateString()}` : ""}
+                  </div>
+                </div>
+                <span style={{ fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 6, background: statusColor + "18", color: statusColor }}>
+                  {inv.status}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Add member modal */}
       {showAdd && (
