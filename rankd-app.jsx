@@ -3280,9 +3280,11 @@ function RankdJoinPanel({ onJoin, sessions }) {
 
 function RankdAdminPanel({ onNav, sessions, onLaunch, onViewResults, onRelaunch }) {
   const statusColors = {
-    waiting: { bg: C.limeBg,    text: "#059669",   label: "Waiting" },
-    live:    { bg: C.orangeLight, text: C.orange,  label: "Live"    },
-    ended:   { bg: C.muted,      text: C.textSub,  label: "Ended"   },
+    waiting:   { bg: C.limeBg,       text: "#059669",  label: "Waiting"   },
+    live:      { bg: C.orangeLight,   text: C.orange,   label: "Live"      },
+    started:   { bg: C.orangeLight,   text: C.orange,   label: "Live"      },
+    ended:     { bg: C.muted,         text: C.textSub,  label: "Ended"     },
+    completed: { bg: C.muted,         text: C.textSub,  label: "Completed" },
   };
 
   return (
@@ -3300,7 +3302,7 @@ function RankdAdminPanel({ onNav, sessions, onLaunch, onViewResults, onRelaunch 
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
         {sessions.map(s => {
-          const sc = statusColors[s.status];
+          const sc = statusColors[s.status] ?? { bg: C.muted, text: C.textSub, label: s.status ?? "Unknown" };
           return (
             <div key={s.code} style={{
               display: "flex", alignItems: "center", gap: 16, padding: 20, borderRadius: 16,
