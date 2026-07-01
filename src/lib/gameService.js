@@ -221,6 +221,131 @@ export function subscribeToLobbyParticipants(sessionId, onInsert) {
   return channel;
 }
 
+// ── LIVE GAME PERSISTENCE ─────────────────────────────────────────────────────
+
+/**
+ * Persist host game state (phase + current question index + paused flag).
+ * Called on each phase transition in KahootHostView so a host refresh can recover.
+ *
+ * @param {string} sessionId - game_sessions.id (UUID)
+ * @param {{ phase: string, currentQuestionIndex?: number, paused?: boolean }} params
+ * @returns {Promise<{ error: Object|null }>}
+ */
+export async function updateSessionPhase(sessionId, { phase, currentQuestionIndex, paused } = {}) {
+  const patch = { phase };
+  if (currentQuestionIndex !== undefined) patch.current_question_index = currentQuestionIndex;
+  if (paused !== undefined) patch.paused = paused;
+  const { error } = await supabase
+    .from("game_sessions")
+    .update(patch)
+    .eq("id", sessionId);
+  return { error };
+}
+
+/**
+ * Batch-insert per-question answers for all players after a reveal.
+ * Called by KahootHostView.doReveal() once scores are computed.
+ *
+ * @param {string} sessionId - game_sessions.id (UUID)
+ * @param {Array<{
+ *   playerId: string,
+ *   playerName: string,
+ *   questionIdx: number,
+ *   optionIdx: number|null,
+ *   text: string|null,
+ *   timeMs: number|null,
+ *   isCorrect: boolean,
+ *   points: number,
+ *   tenantId?: string|null,
+ * }>} answers
+ * @returns {Promise<{ error: Object|null }>}
+ */
+export async function saveGameAnswers(sessionId, answers = []) {
+  if (!answers.length) return { error: null };
+  const rows = answers.map(a => ({
+    session_id:   sessionId,
+    tenant_id:    a.tenantId ?? null,
+    player_id:    a.playerId,
+    player_name:  a.playerName,
+    question_idx: a.questionIdx,
+    option_idx:   a.optionIdx ?? null,
+    answer_text:  a.text ?? null,
+    time_ms:      a.timeMs ?? null,
+    is_correct:   a.isCorrect,
+    points:       a.points ?? 0,
+  }));
+  const { error } = await supabase.from("game_answers").insert(rows);
+  return { error };
+}
+
+/**
+ * Mark a lobby participant as having left the session.
+ * Called when a player disconnects (presence untrack) or manually leaves.
+ *
+ * @param {string} sessionId - game_sessions.id (UUID)
+ * @param {string} playerId - player_id value from game_session_participants
+ * @returns {Promise<{ error: Object|null }>}
+ */
+export async function markParticipantLeft(sessionId, playerId) {
+  const { error } = await supabase
+    .from("game_session_participants")
+    .update({ status: "left", last_seen_at: new Date().toISOString() })
+    .eq("session_id", sessionId)
+    .eq("player_id", playerId);
+  return { error };
+}
+
+/**
+ * Update a participant's last_seen_at heartbeat timestamp.
+ * Called periodically by KahootPlayerView while the player is in-game.
+ *
+ * @param {string} sessionId - game_sessions.id (UUID)
+ * @param {string} playerId
+ * @returns {Promise<{ error: Object|null }>}
+ */
+export async function updateParticipantHeartbeat(sessionId, playerId) {
+  const { error } = await supabase
+    .from("game_session_participants")
+    .update({ last_seen_at: new Date().toISOString() })
+    .eq("session_id", sessionId)
+    .eq("player_id", playerId);
+  return { error };
+}
+
+/**
+ * Fetch game history for a player from game_players table.
+ * Used on the "My Scores" tab to replace the static USER_GAME_HISTORY seed.
+ *
+ * @param {string} playerId - auth user id
+ * @param {number} [limit=20]
+ * @returns {Promise<{ data: Array|null, error: Object|null }>}
+ */
+export async function getPlayerGameHistory(playerId, limit = 20) {
+  const { data, error } = await supabase
+    .from("game_players")
+    .select("*, game_sessions(name, question_count, ended_at, pin)")
+    .eq("player_id", playerId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  return { data, error };
+}
+
+/**
+ * Fetch final results for a completed session from game_players.
+ * Used by RankdResultsScreen when gameData is not in memory (after refresh).
+ *
+ * @param {string} sessionId - game_sessions.id (UUID)
+ * @returns {Promise<{ data: Array|null, error: Object|null }>}
+ */
+export async function getSessionPlayers(sessionId) {
+  const { data, error } = await supabase
+    .from("game_players")
+    .select("*")
+    .eq("session_id", sessionId)
+    .order("final_rank", { ascending: true });
+  return { data, error };
+}
+
 // ── ANALYTICS ─────────────────────────────────────────────────────────────────
 
 /**

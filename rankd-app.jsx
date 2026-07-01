@@ -24,6 +24,12 @@ import {
   joinGameSession,
   getLobbyParticipants,
   subscribeToLobbyParticipants,
+  saveGameAnswers,
+  updateSessionPhase,
+  markParticipantLeft,
+  updateParticipantHeartbeat,
+  getPlayerGameHistory,
+  getSessionPlayers,
 } from "./src/lib/gameService.js";
 import {
   getTenantCourses,
@@ -35,6 +41,9 @@ import {
   deleteQuiz as dbDeleteQuiz,
   getLessonCompletions,
   markLessonComplete,
+  getTenantAssignments,
+  createAssignment as dbCreateAssignment,
+  deleteAssignment as dbDeleteAssignment,
 } from "./src/lib/contentService.js";
 import { getProfile, createMissingProfile, getTenantProfiles } from "./src/lib/profileService.js";
 import { sendInviteEmail } from "./src/lib/emailService.js";
@@ -881,7 +890,7 @@ const Q_TYPE_ICONS  = { mc: "", tf: "", type: "", open: "", slider: "", pin: "",
 // ── REAL GAME HOST VIEW ──────────────────────────────────────
 const PURPLE = "#8B5CF6";
 
-function KahootHostView({ onNav, sessionName, pin, questions, broadcast, chAnswers, chPlayers, onGameEnd }) {
+function KahootHostView({ onNav, sessionName, pin, sessionDbId, tenantId, questions, broadcast, chAnswers, chPlayers, onGameEnd }) {
   const [phase,      setPhase]      = useState("countdown");
   const [qIdx,       setQIdx]       = useState(0);
   const [cdNum,      setCdNum]      = useState(3);
@@ -891,6 +900,16 @@ function KahootHostView({ onNav, sessionName, pin, questions, broadcast, chAnswe
   const [paused,     setPaused]     = useState(false);
   const [showEndConfirm, setShowEndConfirm] = useState(false);
   const [questionHistory, setQuestionHistory] = useState([]);
+
+  // Persist phase transitions to DB so host can recover on refresh
+  const persistPhase = useCallback((nextPhase, nextQIdx, nextPaused) => {
+    if (!sessionDbId) return;
+    updateSessionPhase(sessionDbId, {
+      phase:                nextPhase ?? phase,
+      currentQuestionIndex: nextQIdx  ?? qIdx,
+      paused:               nextPaused ?? paused,
+    }).catch(e => console.error("[ralli:host] updateSessionPhase failed:", e));
+  }, [sessionDbId, phase, qIdx, paused]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const q           = questions[qIdx];
   const total       = questions.length;
@@ -908,6 +927,7 @@ function KahootHostView({ onNav, sessionName, pin, questions, broadcast, chAnswe
     if (phase !== "countdown") return;
     if (cdNum <= 0) {
       setPhase("question"); setTimeLeft(q.timeLimit);
+      persistPhase("question", qIdx, false);
       broadcast({ type: GM.SHOW_QUESTION, qIdx, question: q, timeLimit: q.timeLimit });
       return;
     }
@@ -932,6 +952,7 @@ function KahootHostView({ onNav, sessionName, pin, questions, broadcast, chAnswe
       // Collect open-ended responses and go to grading phase
       setOpenGrades({});
       setPhase("open-review");
+      persistPhase("open-review", qIdx, false);
       broadcast({ type: GM.OPEN_REVIEW, qText: q.q });
       return;
     }
@@ -941,6 +962,7 @@ function KahootHostView({ onNav, sessionName, pin, questions, broadcast, chAnswe
     const qAvgMs = qTotal > 0 ? Object.values(chAnswers).reduce((s,a) => s+(a.timeMs||0), 0) / qTotal : 0;
     setQuestionHistory(h => [...h, { qIdx, q: q?.q, options: q?.options, correct: q?.correct, distribution: qDist, correctCount: qDist[q?.correct]||0, totalAnswers: qTotal, avgTimeMs: qAvgMs }]);
     setPhase("reveal");
+    persistPhase("reveal", qIdx, false);
     const newScores = scores.map(p => {
       const ans = chAnswers[p.id];
       if (!ans) return { ...p, delta: 0, wasCorrect: false };
@@ -952,6 +974,26 @@ function KahootHostView({ onNav, sessionName, pin, questions, broadcast, chAnswe
     newScores.sort((a, b) => b.score - a.score);
     setScores(newScores);
     broadcast({ type: GM.REVEAL, correctIdx: q.correct, scores: newScores });
+    // Persist each player's answer to game_answers (fire-and-forget)
+    if (sessionDbId) {
+      const scoreMap = Object.fromEntries(newScores.map(p => [p.id, p]));
+      const answerRows = Object.entries(chAnswers).map(([pid, ans]) => {
+        const sp = scoreMap[pid];
+        return {
+          playerId:    pid,
+          playerName:  ans.name ?? sp?.name ?? pid,
+          questionIdx: qIdx,
+          optionIdx:   ans.optionIdx ?? null,
+          text:        ans.text ?? null,
+          timeMs:      ans.timeMs ?? null,
+          isCorrect:   ans.optionIdx === q.correct,
+          points:      sp?.delta ?? 0,
+          tenantId,
+        };
+      });
+      saveGameAnswers(sessionDbId, answerRows)
+        .then(({ error }) => { if (error) console.error("[ralli:host] saveGameAnswers failed:", error); });
+    }
   };
 
   // Admin finishes grading open-ended responses
@@ -967,23 +1009,44 @@ function KahootHostView({ onNav, sessionName, pin, questions, broadcast, chAnswe
     setScores(newScores);
     broadcast({ type: GM.REVEAL, correctIdx: null, scores: newScores, isOpen: true });
     setPhase("reveal");
+    persistPhase("reveal", qIdx, false);
+    // Persist open-ended answers (fire-and-forget)
+    if (sessionDbId) {
+      const scoreMap = Object.fromEntries(newScores.map(p => [p.id, p]));
+      const answerRows = openResponses.map(r => ({
+        playerId:    r.playerId,
+        playerName:  r.name ?? r.playerId,
+        questionIdx: qIdx,
+        optionIdx:   null,
+        text:        r.text ?? null,
+        timeMs:      null,
+        isCorrect:   openGrades[r.id] === "correct",
+        points:      scoreMap[r.playerId]?.delta ?? 0,
+        tenantId,
+      }));
+      saveGameAnswers(sessionDbId, answerRows)
+        .then(({ error }) => { if (error) console.error("[ralli:host] saveGameAnswers (open) failed:", error); });
+    }
   };
 
   const doNext = () => {
     if (isFinalQ) {
       broadcast({ type: GM.GAME_END, scores });
       if (onGameEnd) onGameEnd({ scores, questions, questionHistory });
+      persistPhase("ended", qIdx, false);
       onNav("rankd-results");
       return;
     }
     const next = qIdx + 1;
     setQIdx(next); setCdNum(3); setPhase("countdown");
+    persistPhase("countdown", next, false);
     broadcast({ type: GM.NEXT_QUESTION, qIdx: next });
   };
 
   const doTogglePause = () => {
     const next = !paused;
     setPaused(next);
+    persistPhase(phase, qIdx, next);
     broadcast({ type: next ? GM.PAUSE : GM.RESUME });
   };
 
@@ -991,6 +1054,7 @@ function KahootHostView({ onNav, sessionName, pin, questions, broadcast, chAnswe
     setShowEndConfirm(false);
     broadcast({ type: GM.FORCE_END, scores });
     if (onGameEnd) onGameEnd({ scores, questions, questionHistory });
+    persistPhase("ended", qIdx, false);
     onNav("rankd-results");
   };
 
@@ -1215,7 +1279,7 @@ function KahootHostView({ onNav, sessionName, pin, questions, broadcast, chAnswe
 }
 
 // ── REAL GAME PLAYER VIEW ────────────────────────────────────
-function KahootPlayerView({ onNav, playerName, playerId, pin, broadcast, chMsg }) {
+function KahootPlayerView({ onNav, playerName, playerId, pin, sessionDbId, broadcast, chMsg }) {
   const [phase,         setPhase]         = useState("waiting");
   const [cdNum,         setCdNum]         = useState(3);
   const [question,      setQuestion]      = useState(null);
@@ -1231,6 +1295,16 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, broadcast, chMsg }
   const [finalScores,   setFinalScores]   = useState(null);
   const [gamePaused,    setGamePaused]    = useState(false);
   const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
+
+  // Heartbeat: keep last_seen_at fresh while in-game so host can detect stale connections
+  useEffect(() => {
+    if (!sessionDbId || !playerId) return;
+    const interval = setInterval(() => {
+      updateParticipantHeartbeat(sessionDbId, playerId)
+        .catch(e => console.error("[ralli:player] heartbeat failed:", e));
+    }, 30_000);
+    return () => clearInterval(interval);
+  }, [sessionDbId, playerId]);
 
   useEffect(() => {
     if (!chMsg) return;
@@ -1570,13 +1644,13 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, broadcast, chMsg }
 
 // ── RANKD GAME SCREEN ────────────────────────────────────────
 
-function RankdGameScreen({ onNav, sessionName, role, playerName, questions = GAME_QUESTIONS, demoMode = true, pin, broadcast, chMsg, chAnswers, chPlayers, playerId, onGameEnd }) {
+function RankdGameScreen({ onNav, sessionName, role, playerName, questions = GAME_QUESTIONS, demoMode = true, pin, sessionDbId, tenantId, broadcast, chMsg, chAnswers, chPlayers, playerId, onGameEnd }) {
   // Real multiplayer mode — route to Kahoot views
   if (!demoMode && role === "admin") {
-    return <KahootHostView onNav={onNav} sessionName={sessionName} pin={pin} questions={questions} broadcast={broadcast} chAnswers={chAnswers} chPlayers={chPlayers} onGameEnd={onGameEnd} />;
+    return <KahootHostView onNav={onNav} sessionName={sessionName} pin={pin} sessionDbId={sessionDbId} tenantId={tenantId} questions={questions} broadcast={broadcast} chAnswers={chAnswers} chPlayers={chPlayers} onGameEnd={onGameEnd} />;
   }
   if (!demoMode && role !== "admin") {
-    return <KahootPlayerView onNav={onNav} playerName={playerName} playerId={playerId} pin={pin} broadcast={broadcast} chMsg={chMsg} />;
+    return <KahootPlayerView onNav={onNav} playerName={playerName} playerId={playerId} pin={pin} sessionDbId={sessionDbId} broadcast={broadcast} chMsg={chMsg} />;
   }
 
   const mobile = useMobile();
@@ -3113,18 +3187,31 @@ function SessionDetailView({ session, onBack }) {
 
 // ── RANKD JOIN PANEL (user view) ────────────────────────────
 
-function RankdJoinPanel({ onJoin, sessions }) {
+function RankdJoinPanel({ onJoin, sessions, currentUser }) {
   const [pin, setPin]                       = useState("");
-  const [pinError, setPinError]             = useState(false);
+  const [pinError, setPinError]             = useState("");  // empty = no error
+  const [joining, setJoining]               = useState(false);
   const [tab, setTab]                       = useState("join");
-  const [activeHistorySession, setActiveHistorySession] = useState(null); // USER_GAME_HISTORY entry
+  const [activeHistorySession, setActiveHistorySession] = useState(null);
+  const [dbHistory, setDbHistory]           = useState(null); // null = not yet loaded
 
-  const handleJoin = (overridePin) => {
+  // Load real game history when My Scores tab is opened
+  useEffect(() => {
+    if (tab !== "scores" || dbHistory !== null || !currentUser?.id) return;
+    getPlayerGameHistory(currentUser.id).then(({ data }) => {
+      setDbHistory(data ?? []);
+    });
+  }, [tab, currentUser?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleJoin = async (overridePin) => {
     const p = overridePin ?? pin;
-    if (p.length < 4) { setPinError(true); return; }
-    setPinError(false);
+    if (p.length < 4) { setPinError("Enter a valid game PIN"); return; }
+    setPinError("");
+    setJoining(true);
     const sessionName = sessions.find(s => s.code === p)?.name ?? "live game";
-    onJoin(p, sessionName);
+    const err = await onJoin(p, sessionName);
+    setJoining(false);
+    if (err) setPinError(err);
   };
 
   return (
@@ -3156,7 +3243,7 @@ function RankdJoinPanel({ onJoin, sessions }) {
             <p style={{ margin: "0 0 24px", fontSize: 13, color: C.textSub }}>Ask your host for the PIN</p>
             <input
               type="text" inputMode="numeric" maxLength={8} value={pin}
-              onChange={e => { setPin(e.target.value.replace(/\D/g, "")); setPinError(false); }}
+              onChange={e => { setPin(e.target.value.replace(/\D/g, "")); setPinError(""); }}
               placeholder="000000"
               style={{
                 width: "100%", textAlign: "center", fontSize: 28, fontWeight: 900,
@@ -3166,13 +3253,13 @@ function RankdJoinPanel({ onJoin, sessions }) {
                 letterSpacing: "0.25em", outline: "none",
               }}
             />
-            {pinError && <p style={{ fontSize: 12, color: C.red, marginBottom: 8, fontWeight: 600 }}>Enter a valid game PIN</p>}
-            <button onClick={() => handleJoin()} style={{
-              width: "100%", padding: 14, borderRadius: 16, border: "none", cursor: "pointer",
+            {pinError && <p style={{ fontSize: 12, color: C.red, marginBottom: 8, fontWeight: 600 }}>{pinError}</p>}
+            <button onClick={() => handleJoin()} disabled={joining} style={{
+              width: "100%", padding: 14, borderRadius: 16, border: "none", cursor: joining ? "default" : "pointer",
               fontSize: 14, fontWeight: 900, marginTop: 8,
-              background: pin.length >= 4 ? C.orange : C.muted,
-              color: pin.length >= 4 ? "#fff" : C.textMuted,
-            }}>Let's Go! →</button>
+              background: pin.length >= 4 && !joining ? C.orange : C.muted,
+              color: pin.length >= 4 && !joining ? "#fff" : C.textMuted,
+            }}>{joining ? "Checking…" : "Let's Go! →"}</button>
           </div>
 
           {/* Active sessions */}
@@ -3213,16 +3300,110 @@ function RankdJoinPanel({ onJoin, sessions }) {
         activeHistorySession ? (
           <SessionDetailView session={activeHistorySession} onBack={() => setActiveHistorySession(null)} />
         ) : (() => {
-          const bestScore  = Math.max(...USER_GAME_HISTORY.map(s => s.scorePercent));
-          const bestRankS  = USER_GAME_HISTORY.reduce((a, b) => a.rank <= b.rank ? a : b);
-          const bestScoreS = USER_GAME_HISTORY.reduce((a, b) => a.scorePercent >= b.scorePercent ? a : b);
+          // Real users: use DB history if loaded; demo users: use seed data
+          const useDb       = currentUser?._isReal && dbHistory !== null;
+          const isLoading   = currentUser?._isReal && dbHistory === null;
+          const historyData = useDb ? dbHistory : USER_GAME_HISTORY;
+
+          if (isLoading) {
+            return <p style={{ fontSize: 13, color: C.textSub, padding: "20px 0" }}>Loading your game history…</p>;
+          }
+          if (useDb && historyData.length === 0) {
+            return (
+              <div style={{ textAlign: "center", padding: "48px 0", color: C.textSub }}>
+                <p style={{ fontSize: 22, margin: "0 0 8px" }}>🎮</p>
+                <p style={{ margin: 0, fontSize: 14, fontWeight: 600 }}>No games yet</p>
+                <p style={{ margin: "4px 0 0", fontSize: 12 }}>Join a game to start tracking your scores.</p>
+              </div>
+            );
+          }
+
+          // Map DB rows to display shape (mirrors USER_GAME_HISTORY shape)
+          const displayHistory = useDb
+            ? historyData.map((row, i) => ({
+                id:          row.id,
+                sessionName: row.game_sessions?.name ?? "Game",
+                date:        row.game_sessions?.ended_at ? new Date(row.game_sessions.ended_at).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "—",
+                rank:        row.final_rank ?? i + 1,
+                totalPlayers: null,
+                score:       row.final_score ?? 0,
+                scorePercent: null, // not stored in game_players
+                accuracy:    null,
+                pin:         row.game_sessions?.pin ?? "—",
+                questionCount: row.game_sessions?.question_count ?? "—",
+                questions:   [],
+              }))
+            : historyData;
+
+          if (!useDb) {
+            // Legacy demo path — unchanged
+            const bestScore  = Math.max(...USER_GAME_HISTORY.map(s => s.scorePercent));
+            const bestRankS  = USER_GAME_HISTORY.reduce((a, b) => a.rank <= b.rank ? a : b);
+            const bestScoreS = USER_GAME_HISTORY.reduce((a, b) => a.scorePercent >= b.scorePercent ? a : b);
+            return (
+              <div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginBottom: 28 }}>
+                  {[
+                    { label: "Best Score",   value: `${bestScore}%`,       sub: bestScoreS.sessionName.split(" ").slice(0, 3).join(" "),  color: C.orange },
+                    { label: "Games Played", value: String(USER_GAME_HISTORY.length), sub: "sessions completed",                           color: C.orange },
+                    { label: "Best Rank",    value: `#${bestRankS.rank}`,  sub: `of ${bestRankS.totalPlayers} players`,                   color: C.green  },
+                  ].map(m => (
+                    <div key={m.label} style={{ borderRadius: 16, padding: 20, background: C.white, border: `1px solid ${C.border}` }}>
+                      <p style={{ margin: 0, fontSize: 24, fontWeight: 900, color: C.text }}>{m.value}</p>
+                      <p style={{ margin: "2px 0 0", fontSize: 11, color: C.textSub }}>{m.label}</p>
+                      <p style={{ margin: "2px 0 0", fontSize: 10, fontWeight: 600, color: C.textMuted }}>{m.sub}</p>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ borderRadius: 16, overflow: "hidden", background: C.white, border: `1px solid ${C.border}` }}>
+                  <div style={{ padding: "12px 20px", borderBottom: `1px solid ${C.border}`, background: "#FFF7ED", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <h3 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: C.text }}>Session History</h3>
+                    <span style={{ fontSize: 11, color: C.textSub }}>Click a session to see details</span>
+                  </div>
+                  {USER_GAME_HISTORY.map((s, idx) => {
+                    const scoreColor = s.scorePercent >= 85 ? C.green : s.scorePercent >= 70 ? C.orange : C.red;
+                    return (
+                      <button key={s.id} onClick={() => setActiveHistorySession(s)} style={{
+                        width: "100%", padding: "16px 20px", display: "flex", alignItems: "center", gap: 16,
+                        borderBottom: idx < USER_GAME_HISTORY.length - 1 ? `1px solid ${C.border}` : "none",
+                        background: "transparent", border: "none", cursor: "pointer", textAlign: "left",
+                        transition: "background 0.15s",
+                      }}
+                      onMouseEnter={e => e.currentTarget.style.background = C.pageBg}
+                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                        <div style={{ width: 36, height: 36, borderRadius: 10, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, background: s.rank === 1 ? C.orange : C.muted, color: s.rank === 1 ? "#fff" : C.textSub }}>
+                          #{s.rank}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: C.text }}>{s.sessionName}</p>
+                          <p style={{ margin: "2px 0 0", fontSize: 11, color: C.textSub }}>{s.date} · {s.questions.length} questions · {s.totalPlayers} players</p>
+                        </div>
+                        <div style={{ textAlign: "right", flexShrink: 0 }}>
+                          <p style={{ margin: 0, fontSize: 18, fontWeight: 900, color: scoreColor }}>{s.scorePercent}%</p>
+                          <p style={{ margin: 0, fontSize: 10, color: C.textMuted }}>{s.accuracy}% accuracy</p>
+                        </div>
+                        <div style={{ width: 64, flexShrink: 0 }}>
+                          <div style={{ height: 6, borderRadius: 99, overflow: "hidden", background: C.muted }}>
+                            <div style={{ height: "100%", borderRadius: 99, width: `${s.scorePercent}%`, background: scoreColor }} />
+                          </div>
+                        </div>
+                        <span style={{ fontSize: 14, color: C.textMuted, flexShrink: 0 }}>›</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          }
+
+          // Real user DB history display
+          const bestRank = displayHistory.reduce((a, b) => (a.rank <= b.rank ? a : b), displayHistory[0]);
           return (
             <div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginBottom: 28 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 16, marginBottom: 28 }}>
                 {[
-                  { label: "Best Score",   value: `${bestScore}%`,       sub: bestScoreS.sessionName.split(" ").slice(0, 3).join(" "),  color: C.orange },
-                  { label: "Games Played", value: String(USER_GAME_HISTORY.length), sub: "sessions completed",                           color: C.orange },
-                  { label: "Best Rank",    value: `#${bestRankS.rank}`,  sub: `of ${bestRankS.totalPlayers} players`,                   color: C.green  },
+                  { label: "Games Played", value: String(displayHistory.length), sub: "sessions completed", color: C.orange },
+                  { label: "Best Rank",    value: bestRank ? `#${bestRank.rank}` : "—", sub: bestRank?.sessionName ?? "", color: C.green },
                 ].map(m => (
                   <div key={m.label} style={{ borderRadius: 16, padding: 20, background: C.white, border: `1px solid ${C.border}` }}>
                     <p style={{ margin: 0, fontSize: 24, fontWeight: 900, color: C.text }}>{m.value}</p>
@@ -3232,41 +3413,26 @@ function RankdJoinPanel({ onJoin, sessions }) {
                 ))}
               </div>
               <div style={{ borderRadius: 16, overflow: "hidden", background: C.white, border: `1px solid ${C.border}` }}>
-                <div style={{ padding: "12px 20px", borderBottom: `1px solid ${C.border}`, background: "#FFF7ED", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div style={{ padding: "12px 20px", borderBottom: `1px solid ${C.border}`, background: "#FFF7ED" }}>
                   <h3 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: C.text }}>Session History</h3>
-                  <span style={{ fontSize: 11, color: C.textSub }}>Click a session to see details</span>
                 </div>
-                {USER_GAME_HISTORY.map((s, idx) => {
-                  const scoreColor = s.scorePercent >= 85 ? C.green : s.scorePercent >= 70 ? C.orange : C.red;
-                  return (
-                    <button key={s.id} onClick={() => setActiveHistorySession(s)} style={{
-                      width: "100%", padding: "16px 20px", display: "flex", alignItems: "center", gap: 16,
-                      borderBottom: idx < USER_GAME_HISTORY.length - 1 ? `1px solid ${C.border}` : "none",
-                      background: "transparent", border: "none", cursor: "pointer", textAlign: "left",
-                      transition: "background 0.15s",
-                    }}
-                    onMouseEnter={e => e.currentTarget.style.background = C.pageBg}
-                    onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
-                      <div style={{ width: 36, height: 36, borderRadius: 10, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, background: s.rank === 1 ? C.orange : C.muted, color: s.rank === 1 ? "#fff" : C.textSub }}>
-                        #{s.rank}
-                      </div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: C.text }}>{s.sessionName}</p>
-                        <p style={{ margin: "2px 0 0", fontSize: 11, color: C.textSub }}>{s.date} · {s.questions.length} questions · {s.totalPlayers} players</p>
-                      </div>
-                      <div style={{ textAlign: "right", flexShrink: 0 }}>
-                        <p style={{ margin: 0, fontSize: 18, fontWeight: 900, color: scoreColor }}>{s.scorePercent}%</p>
-                        <p style={{ margin: 0, fontSize: 10, color: C.textMuted }}>{s.accuracy}% accuracy</p>
-                      </div>
-                      <div style={{ width: 64, flexShrink: 0 }}>
-                        <div style={{ height: 6, borderRadius: 99, overflow: "hidden", background: C.muted }}>
-                          <div style={{ height: "100%", borderRadius: 99, width: `${s.scorePercent}%`, background: scoreColor }} />
-                        </div>
-                      </div>
-                      <span style={{ fontSize: 14, color: C.textMuted, flexShrink: 0 }}>›</span>
-                    </button>
-                  );
-                })}
+                {displayHistory.map((s, idx) => (
+                  <div key={s.id} style={{
+                    padding: "16px 20px", display: "flex", alignItems: "center", gap: 16,
+                    borderBottom: idx < displayHistory.length - 1 ? `1px solid ${C.border}` : "none",
+                  }}>
+                    <div style={{ width: 36, height: 36, borderRadius: 10, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, background: s.rank === 1 ? C.orange : C.muted, color: s.rank === 1 ? "#fff" : C.textSub }}>
+                      #{s.rank}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: C.text }}>{s.sessionName}</p>
+                      <p style={{ margin: "2px 0 0", fontSize: 11, color: C.textSub }}>{s.date} · PIN: {s.pin}</p>
+                    </div>
+                    <div style={{ textAlign: "right", flexShrink: 0 }}>
+                      <p style={{ margin: 0, fontSize: 18, fontWeight: 900, color: C.orange }}>{(s.score ?? 0).toLocaleString()} pts</p>
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           );
@@ -3354,7 +3520,7 @@ function RankdAdminPanel({ onNav, sessions, onLaunch, onViewResults, onRelaunch 
 
 // ── RANKD SCREEN (hub, role-aware) ──────────────────────────
 
-function RankdScreen({ onNav, onJoin, sessions, onLaunch, onViewResults, onRelaunch, role }) {
+function RankdScreen({ onNav, onJoin, sessions, onLaunch, onViewResults, onRelaunch, role, currentUser }) {
   return (
     <div style={{ display: "flex", flexDirection: "column" }}>
       {/* Hero */}
@@ -3404,7 +3570,7 @@ function RankdScreen({ onNav, onJoin, sessions, onLaunch, onViewResults, onRelau
       <div style={{ background: C.white, borderRadius: "0 0 12px 12px", border: `1px solid ${C.border}`, borderTop: "none" }}>
         {role === "admin"
           ? <RankdAdminPanel onNav={onNav} sessions={sessions} onLaunch={onLaunch} onViewResults={onViewResults} onRelaunch={onRelaunch} />
-          : <RankdJoinPanel onJoin={onJoin} sessions={sessions} />}
+          : <RankdJoinPanel onJoin={onJoin} sessions={sessions} currentUser={currentUser} />}
       </div>
     </div>
   );
@@ -3530,11 +3696,12 @@ function RankdLobbyScreen({ onNav, pin, playerName, playerEmoji, sessionName, ro
   const [dbPlayers, setDbPlayers] = useState([]);
 
   const normParticipant = (p) => ({
-    id:    p.player_id ?? p.id,
-    name:  p.name,
-    emoji: p.emoji  ?? PLAYER_EMOJIS[0],
-    color: p.color  ?? PLAYER_COLORS[0],
-    score: 0,
+    id:     p.player_id ?? p.id,
+    name:   p.name,
+    emoji:  p.emoji  ?? PLAYER_EMOJIS[0],
+    color:  p.color  ?? PLAYER_COLORS[0],
+    score:  0,
+    status: p.status ?? "active",
   });
 
   // ── Debug: log lobby mount state ──────────────────────────────────────────
@@ -3586,11 +3753,14 @@ function RankdLobbyScreen({ onNav, pin, playerName, playerEmoji, sessionName, ro
   const demoAllPlayers = [basePlayer, ...LOBBY_PLAYERS.filter(p => p.name !== basePlayer.name)];
 
   // Real mode: merge DB participants (source of truth) with Presence players (belt-and-suspenders).
-  // Deduplicate by id so the same player doesn't appear twice.
+  // Deduplicate by id. Exclude DB players with status='left' or 'disconnected'.
   const combinedRealPlayers = (() => {
     if (isDemoMode) return [];
     const map = new Map();
-    [...dbPlayers, ...chPlayers].forEach(p => { if (p.id) map.set(p.id, p); });
+    // DB players first (includes status); only keep active ones
+    dbPlayers.filter(p => p.status !== "left" && p.status !== "disconnected").forEach(p => { if (p.id) map.set(p.id, p); });
+    // Presence players add any not yet in DB (belt-and-suspenders)
+    chPlayers.forEach(p => { if (p.id && !map.has(p.id)) map.set(p.id, p); });
     return Array.from(map.values());
   })();
 
@@ -3604,10 +3774,10 @@ function RankdLobbyScreen({ onNav, pin, playerName, playerEmoji, sessionName, ro
     broadcast({ type: GM.PLAYER_JOIN, player: { id: playerId, name: playerName, emoji: playerEmoji ?? PLAYER_EMOJIS[pidx], color: PLAYER_COLORS[pidx % PLAYER_COLORS.length] } });
   }, [isDemoMode, pin, playerId, role]);
 
-  // Player side: watch for GAME_START
+  // Player side: watch for GAME_START or first SHOW_QUESTION → navigate to game
   useEffect(() => {
     if (isDemoMode || role === "admin") return;
-    if (chMsg?.type === GM.SHOW_QUESTION) onNav("rankd-game");
+    if (chMsg?.type === GM.SHOW_QUESTION || chMsg?.type === GM.GAME_START) onNav("rankd-game");
   }, [chMsg, isDemoMode, role]);
 
   useEffect(() => {
@@ -3799,9 +3969,28 @@ function RankdLobbyScreen({ onNav, pin, playerName, playerEmoji, sessionName, ro
 function RankdResultsScreen({ onNav, sessionCode, sessions, gameData }) {
   const session   = sessions.find(s => s.code === sessionCode) ?? sessions[1];
   const [tab, setTab] = useState("summary");
+  const [dbScores, setDbScores] = useState(null); // loaded from game_players on refresh
 
-  // Use real game data if available, else fall back to mock
-  const realScores    = gameData?.scores ?? null;
+  // If gameData not in memory (e.g. host refreshed after game ended), load from DB
+  useEffect(() => {
+    if (gameData?.scores || !session?.dbId) return;
+    getSessionPlayers(session.dbId).then(({ data }) => {
+      if (data?.length) {
+        setDbScores(data.map((p, i) => ({
+          id:         p.player_id,
+          name:       p.name,
+          emoji:      p.emoji ?? "🙂",
+          color:      p.color ?? C.orange,
+          score:      p.final_score ?? 0,
+          delta:      0,
+          wasCorrect: null,
+        })));
+      }
+    });
+  }, [session?.dbId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Use real game data if available, else fall back to DB scores, else mock
+  const realScores    = gameData?.scores ?? dbScores ?? null;
   const realQuestions = gameData?.questions ?? null;
   const realQHistory  = gameData?.questionHistory ?? null;
 
@@ -4880,10 +5069,12 @@ function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, p
     Promise.all([
       getTenantCourses(tenantId),
       getTenantLessons(tenantId),
-    ]).then(([{ data: dbCourses }, { data: dbLessons }]) => {
+      getTenantAssignments(tenantId),
+    ]).then(([{ data: dbCourses }, { data: dbLessons }, { data: dbAssignments }]) => {
       // Real tenants always start blank — replace seed data (empty array if no content yet)
       setCourses(dbCourses ?? []);
       setLessons(dbLessons ?? []);
+      setAssignments(dbAssignments ?? []);
     });
   }, [tenantId, isReal]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -5251,12 +5442,17 @@ function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, p
   ];
 
   const getAssignedLabel = (a) => {
-    if (a.assignedTo.type === "group") {
+    const t = a.assignedTo?.type;
+    if (t === "team") return `Team: ${a.assignedTo.teamName ?? a.assignedTo.teamId ?? "Unknown"}`;
+    if (t === "group") {
       const org = orgs.find(o => o.id === a.assignedTo.orgId);
       return `All users · ${org?.name ?? "Unknown org"}`;
     }
-    const u = orgUsers.find(u => u.id === a.assignedTo.userId);
-    return u ? `${u.name} (${u.title})` : "Unknown user";
+    // individual
+    const name = a.assignedTo?.userName;
+    if (name) return name;
+    const u = orgUsers.find(u => u.id === a.assignedTo?.userId);
+    return u ? u.name : "Unknown user";
   };
 
   return (
@@ -5312,7 +5508,7 @@ function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, p
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 16 }}>
           {filteredCourses.map(course => {
             const courseLessons = course.lessonIds.map(id => lessons.find(l => l.id === id)).filter(Boolean);
-            const totalMin = courseLessons.reduce((sum, l) => sum + parseInt(l.duration), 0);
+            const totalMin = courseLessons.reduce((sum, l) => sum + (parseInt(l.duration) || 0), 0);
             return (
               <Card key={course.id} style={{ display: "flex", flexDirection: "column", gap: 0, padding: 0, overflow: "hidden" }}>
                 {/* Color header */}
@@ -5439,7 +5635,12 @@ function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, p
                     {getAssignedLabel(a)} · Assigned {a.assignedAt} · Due {a.dueAt}
                   </div>
                 </div>
-                <button onClick={() => setAssignments(prev => prev.filter(x => x.id !== a.id))} style={{
+                <button onClick={() => {
+                  setAssignments(prev => prev.filter(x => x.id !== a.id));
+                  if (isReal && a.id && !a.id.startsWith("a")) {
+                    dbDeleteAssignment(a.id).then(({ error }) => { if (error) console.error("[ralli] deleteAssignment failed:", error); });
+                  }
+                }} style={{
                   padding: "6px 12px", borderRadius: 7, border: `1px solid rgba(239,68,68,0.3)`,
                   background: "rgba(239,68,68,0.06)", color: C.red, fontSize: 12, fontWeight: 600, cursor: "pointer", flexShrink: 0,
                 }}>Remove</button>
@@ -5522,8 +5723,17 @@ function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, p
           orgUsers={orgUsers}
           orgs={orgs}
           currentUser={user}
-          onAssign={(assignment) => {
-            setAssignments(prev => [...prev, { ...assignment, id: "a" + Date.now(), assignedAt: "Today" }]);
+          tenantId={tenantId}
+          isReal={isReal}
+          onAssign={async (assignment) => {
+            if (isReal && tenantId) {
+              const { data: saved, error } = await dbCreateAssignment(tenantId, assignment, user?.id);
+              if (error) console.error("[ralli] createAssignment failed:", error);
+              const canonical = saved ?? { ...assignment, id: "a" + Date.now(), assignedAt: "Today" };
+              setAssignments(prev => [...prev, canonical]);
+            } else {
+              setAssignments(prev => [...prev, { ...assignment, id: "a" + Date.now(), assignedAt: "Today" }]);
+            }
             setAssignModal(null);
             setTab("assignments");
           }}
@@ -5810,8 +6020,12 @@ function CourseBuilderModal({ course, lessons, onSave, onClose, onCreateLesson }
     return (
       <LessonBuilderModal
         lesson={null}
-        onSave={(l) => {
-          const newId = onCreateLesson ? onCreateLesson(l) : ("ll" + Date.now());
+        onSave={async (l) => {
+          // onCreateLesson is async for real users (awaits Supabase insert).
+          // Must await here so newId is a UUID string, not a Promise.
+          const newId = onCreateLesson
+            ? await onCreateLesson(l)
+            : ("ll" + Date.now());
           const created = { ...l, id: newId };
           setLocalLessons(prev => [...prev, created]);
           setSelectedLessons(prev => [...prev, newId]);
@@ -6125,33 +6339,85 @@ function LessonBuilderModal({ lesson, onSave, onClose }) {
 }
 
 // ── ASSIGN CONTENT MODAL ────────────────────────────────────
-function AssignContentModal({ contentType, contentId, content, orgUsers, orgs, currentUser, onAssign, onClose }) {
-  const [assignType, setAssignType] = useState("group"); // "group" | "individual"
-  const [selectedOrgId, setSelectedOrgId] = useState(currentUser?.orgId ?? orgs[0]?.id ?? "");
+function AssignContentModal({ contentType, contentId, content, orgUsers, orgs, currentUser, onAssign, onClose, tenantId, isReal }) {
+  const isSuperAdmin = isRalliAdmin(currentUser?.role);
+  // "team" for org-scoped users (orgAdmin/manager), "group" (org-wide) for superadmin
+  const defaultType  = isSuperAdmin ? "group" : "team";
+  const [assignType, setAssignType] = useState(defaultType);
+  const [selectedOrgId,  setSelectedOrgId]  = useState(currentUser?.orgId ?? orgs[0]?.id ?? "");
+  const [selectedTeamId, setSelectedTeamId] = useState("");
   const [selectedUserId, setSelectedUserId] = useState("");
   const [dueDate, setDueDate]   = useState("");
   const [required, setRequired] = useState(false);
 
-  // Filter users: org admins assign within their org; superadmin can pick across orgs
-  const availableUsers = currentUser?.role === "superadmin"
-    ? orgUsers.filter(u => u.role === "user" || u.role === "orgAdmin")
-    : orgUsers.filter(u => u.orgId === currentUser?.orgId && u.id !== currentUser?.id);
+  // Loaded from Supabase for real users; fall back to passed props for demo
+  const [tenantUsers,  setTenantUsers]  = useState(null); // null = loading
+  const [tenantTeams,  setTenantTeams]  = useState(null);
 
-  const availableOrgs = currentUser?.role === "superadmin"
+  useEffect(() => {
+    if (!isReal || !tenantId) return;
+    // Load users
+    supabase.from("profiles")
+      .select("id, name, email, role, color")
+      .eq("tenant_id", tenantId)
+      .neq("status", "inactive")
+      .then(({ data }) => {
+        if (!data) return;
+        setTenantUsers(data.map(m => ({
+          id:       m.id,
+          name:     m.name ?? m.email?.split("@")[0] ?? "User",
+          initials: (m.name ?? m.email ?? "U").split(" ").map(p => p[0] ?? "").join("").toUpperCase().slice(0, 2) || "U",
+          role:     m.role ?? "user",
+          color:    m.color ?? "#F97316",
+          orgId:    tenantId,
+        })));
+      });
+    // Load teams
+    supabase.from("tenant_teams")
+      .select("id, name")
+      .eq("tenant_id", tenantId)
+      .order("name")
+      .then(({ data }) => { setTenantTeams(data ?? []); });
+  }, [tenantId, isReal]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Resolved lists: prefer freshly-loaded Supabase data, fall back to passed props
+  const availableUsers = tenantUsers !== null
+    ? tenantUsers.filter(u => u.id !== currentUser?.id)
+    : (isSuperAdmin
+        ? orgUsers.filter(u => u.role === "user" || u.role === "orgAdmin")
+        : orgUsers.filter(u => u.orgId === currentUser?.orgId && u.id !== currentUser?.id));
+
+  const availableOrgs  = isSuperAdmin
     ? orgs.filter(o => o.status === "active")
     : orgs.filter(o => o.id === currentUser?.orgId);
 
+  const availableTeams = tenantTeams ?? [];
+
   const handleAssign = () => {
     const base = { contentType, contentId, required, dueAt: dueDate || "Open" };
-    if (assignType === "group") {
+    if (assignType === "team") {
+      if (!selectedTeamId) return;
+      const team = availableTeams.find(t => t.id === selectedTeamId);
+      onAssign({ ...base, assignedTo: { type: "team", teamId: selectedTeamId, teamName: team?.name ?? "" } });
+    } else if (assignType === "group") {
       onAssign({ ...base, assignedTo: { type: "group", orgId: selectedOrgId } });
     } else {
       if (!selectedUserId) return;
-      onAssign({ ...base, assignedTo: { type: "individual", userId: selectedUserId } });
+      const u = availableUsers.find(x => x.id === selectedUserId);
+      onAssign({ ...base, assignedTo: { type: "individual", userId: selectedUserId, userName: u?.name ?? "" } });
     }
   };
 
-  const canSubmit = assignType === "group" ? !!selectedOrgId : !!selectedUserId;
+  const canSubmit = assignType === "team"
+    ? !!selectedTeamId
+    : assignType === "group"
+      ? !!selectedOrgId
+      : !!selectedUserId;
+
+  // Toggle options: superadmin sees Group + Individual, org users see Team + Individual
+  const toggleOptions = isSuperAdmin
+    ? [["group", "Group", "All users in an org"], ["individual", "Individual", "One specific rep"]]
+    : [["team", "Team", "All members of a team"], ["individual", "Individual", "One specific rep"]];
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }}
@@ -6175,20 +6441,41 @@ function AssignContentModal({ contentType, contentId, content, orgUsers, orgs, c
         {/* Assign type toggle */}
         <label style={{ fontSize: 12, fontWeight: 700, color: C.textSub, display: "block", marginBottom: 8 }}>ASSIGN TO</label>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 20 }}>
-          {[["group", "", "Group", "All users in an org"], ["individual", "", "Individual", "One specific rep"]].map(([id, icon, label, sub]) => (
+          {toggleOptions.map(([id, label, sub]) => (
             <button key={id} onClick={() => setAssignType(id)} style={{
               padding: "12px 14px", borderRadius: 10, cursor: "pointer", textAlign: "left",
               border: `2px solid ${assignType === id ? C.orange : C.border}`,
               background: assignType === id ? C.orangeLight : C.pageBg,
             }}>
-              {icon && <div style={{ fontSize: 20, marginBottom: 4 }}>{icon}</div>}
               <div style={{ fontSize: 13, fontWeight: 700, color: assignType === id ? C.orange : C.text }}>{label}</div>
               <div style={{ fontSize: 11, color: C.textSub }}>{sub}</div>
             </button>
           ))}
         </div>
 
-        {assignType === "group" ? (
+        {assignType === "team" ? (
+          <>
+            <label style={{ fontSize: 12, fontWeight: 700, color: C.textSub, display: "block", marginBottom: 8 }}>SELECT TEAM</label>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 220, overflowY: "auto", marginBottom: 20 }}>
+              {tenantTeams === null && <p style={{ margin: 0, fontSize: 13, color: C.textSub }}>Loading teams…</p>}
+              {tenantTeams !== null && availableTeams.length === 0 && (
+                <p style={{ margin: 0, fontSize: 13, color: C.textSub }}>No teams yet. Create one in the Team tab first.</p>
+              )}
+              {availableTeams.map(team => (
+                <button key={team.id} onClick={() => setSelectedTeamId(team.id)} style={{
+                  display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", borderRadius: 10,
+                  border: `2px solid ${selectedTeamId === team.id ? C.orange : C.border}`,
+                  background: selectedTeamId === team.id ? C.orangeLight : C.pageBg, cursor: "pointer", textAlign: "left",
+                }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: selectedTeamId === team.id ? C.orange : C.text }}>{team.name}</div>
+                  </div>
+                  {selectedTeamId === team.id && <span style={{ color: C.orange }}>✓</span>}
+                </button>
+              ))}
+            </div>
+          </>
+        ) : assignType === "group" ? (
           <>
             <label style={{ fontSize: 12, fontWeight: 700, color: C.textSub, display: "block", marginBottom: 8 }}>SELECT ORGANIZATION</label>
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 20 }}>
@@ -6211,16 +6498,20 @@ function AssignContentModal({ contentType, contentId, content, orgUsers, orgs, c
           <>
             <label style={{ fontSize: 12, fontWeight: 700, color: C.textSub, display: "block", marginBottom: 8 }}>SELECT USER</label>
             <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 220, overflowY: "auto", marginBottom: 20 }}>
+              {tenantUsers === null && isReal && <p style={{ margin: 0, fontSize: 13, color: C.textSub }}>Loading users…</p>}
+              {availableUsers.length === 0 && (tenantUsers !== null || !isReal) && (
+                <p style={{ margin: 0, fontSize: 13, color: C.textSub }}>No other users in this tenant yet.</p>
+              )}
               {availableUsers.map(u => (
                 <button key={u.id} onClick={() => setSelectedUserId(u.id)} style={{
                   display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", borderRadius: 10,
                   border: `2px solid ${selectedUserId === u.id ? C.orange : C.border}`,
                   background: selectedUserId === u.id ? C.orangeLight : C.pageBg, cursor: "pointer", textAlign: "left",
                 }}>
-                  <Avatar initials={u.initials} size={32} color={u.color} />
+                  <Avatar initials={u.initials ?? (u.name?.[0] ?? "U").toUpperCase()} size={32} color={u.color} />
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: 13, fontWeight: 700, color: selectedUserId === u.id ? C.orange : C.text }}>{u.name}</div>
-                    <div style={{ fontSize: 11, color: C.textSub }}>{u.title} · {orgs.find(o => o.id === u.orgId)?.name ?? u.orgId}</div>
+                    <div style={{ fontSize: 11, color: C.textSub }}>{u.role}</div>
                   </div>
                   {selectedUserId === u.id && <span style={{ color: C.orange }}>✓</span>}
                 </button>
@@ -11946,9 +12237,12 @@ export default function App() {
       if (data) setSessions(data);
     });
 
-    // Quizzes — real tenants always start blank
-    getTenantQuizzes(tenantId).then(({ data }) => {
-      setQuizzes(data ?? []);
+    // Quizzes — real tenants load from Supabase.
+    // Only replace state if the query succeeded (data !== null).
+    // A null result means RLS/network error — keep whatever localStorage init loaded.
+    getTenantQuizzes(tenantId).then(({ data, error }) => {
+      if (error) console.error("[ralli] getTenantQuizzes failed:", error);
+      if (data !== null) setQuizzes(data);
     });
 
     // Battle cards — real orgs start blank; use tenant-scoped localStorage keys
@@ -12433,12 +12727,14 @@ export default function App() {
         // Cross-tenant protection: real users can only join their own org's sessions
         if (currentUser?._isReal && remote.tenant_id && remote.tenant_id !== currentUser.orgId) {
           console.warn("[ralli:game] handleEnterPin: cross-tenant join BLOCKED — session.tenantId:", remote.tenant_id, "user.orgId:", currentUser.orgId);
-          return;
+          return "This game belongs to a different organization.";
         }
         // Only allow joining sessions that are actively waiting for players
         if (remote.status && remote.status !== "waiting") {
           console.warn("[ralli:game] handleEnterPin: session not accepting players, status:", remote.status);
-          return;
+          return remote.status === "completed" || remote.status === "ended"
+            ? "This game has already ended."
+            : "This game has already started.";
         }
         const fetched = {
           code:          remote.pin,
@@ -12457,8 +12753,10 @@ export default function App() {
         console.log("[ralli:game] fetched session added to local state — dbId:", remote.id);
       } else if (pinErr) {
         console.error("[ralli:game] findSessionByPin FAILED — likely RLS blocking authenticated read:", pinErr);
+        return "Couldn't verify that PIN. Check your connection and try again.";
       } else {
         console.warn("[ralli:game] findSessionByPin: no session found for PIN", pin, "— check if session was created in DB");
+        return "No active game found for that PIN.";
       }
     }
 
@@ -12472,6 +12770,7 @@ export default function App() {
     setLobbyPin(pin);
     setLobbySessionName(sessionName);
     setScreen("rankd-name-entry");
+    return null; // success
   };
 
   // User: confirmed name → persist participant to Supabase → go to lobby
@@ -12583,12 +12882,12 @@ export default function App() {
       case "home":              return isOrgAdmin
         ? <LeadershipDashboardScreen currentOrg={currentOrg} orgUsers={orgUsers} isReal={!!user?._isReal} />
         : <HomeScreen user={user} onNav={navigate} quizAssignments={USER_QUIZ_ASSIGNMENTS_SEED} onResumeLesson={(id) => { setPendingLessonId(id); navigate("learn"); }} onStartQuiz={(id) => { setPendingQuizId(id); navigate("quizzes"); }} />;
-      case "rankd":             return <RankdScreen onNav={navigate} onJoin={handleEnterPin} sessions={sessions} onLaunch={handleLaunch} onViewResults={handleViewResults} onRelaunch={handleRelaunch} role={gameRole} />;
+      case "rankd":             return <RankdScreen onNav={navigate} onJoin={handleEnterPin} sessions={sessions} onLaunch={handleLaunch} onViewResults={handleViewResults} onRelaunch={handleRelaunch} role={gameRole} currentUser={currentUser} />;
       case "rankd-new":         return <NewSessionScreen onNav={navigate} quizzes={quizzes} onCreateSession={handleCreateSession} />;
       case "rankd-quiz-builder":return <QuizBuilderScreen onNav={navigate} onSave={handleSaveQuiz} initialQuiz={editingQuiz} onEditQuiz={handleEditQuiz} />;
       case "rankd-name-entry":  return <RankdNameEntryScreen onNav={navigate} pin={lobbyPin} sessionName={lobbySessionName} onConfirm={handleEnterName} defaultName={userProfile.nickname?.trim() || user?.name || ""} defaultAvatar={userProfile.avatarEmoji} />;
       case "rankd-lobby":       return <RankdLobbyScreen onNav={navigate} pin={lobbyPin} playerName={lobbyPlayerName} playerEmoji={lobbyPlayerEmoji} sessionName={lobbySessionName} role={gameRole} sessions={sessions} currentUser={currentUser} onGameStart={handleGameStart} chPlayers={chPlayers} broadcast={broadcast} playerId={playerId} chMsg={chMsg} />;
-      case "rankd-game":        return <RankdGameScreen onNav={navigate} sessionName={lobbySessionName} role={gameRole} playerName={lobbyPlayerName ?? user.name} questions={gameQuestions ?? GAME_QUESTIONS} demoMode={gameRole === "admin" && sessions.find(s => s.code === lobbyPin)?.demoMode !== false} pin={lobbyPin} broadcast={broadcast} chMsg={chMsg} chAnswers={chAnswers} chPlayers={chPlayers} playerId={playerId} onGameEnd={handleGameEnd} />;
+      case "rankd-game":        return <RankdGameScreen onNav={navigate} sessionName={lobbySessionName} role={gameRole} playerName={lobbyPlayerName ?? user.name} questions={gameQuestions ?? GAME_QUESTIONS} demoMode={gameRole === "admin" && sessions.find(s => s.code === lobbyPin)?.demoMode !== false} pin={lobbyPin} sessionDbId={sessions.find(s => s.code === lobbyPin)?.dbId ?? null} tenantId={currentOrg?.id ?? user?.orgId ?? null} broadcast={broadcast} chMsg={chMsg} chAnswers={chAnswers} chPlayers={chPlayers} playerId={playerId} onGameEnd={handleGameEnd} />;
       case "rankd-results":     return <RankdResultsScreen onNav={navigate} sessionCode={viewResultsCode} sessions={sessions} gameData={gameResultsData} />;
       case "learn":             return <LearnScreen role={gameRole} user={user} orgUsers={orgUsers} orgs={orgs} onNav={navigate} onAwardXp={handleAwardXp} pendingLessonId={pendingLessonId} onClearPendingLesson={() => setPendingLessonId(null)} canCreate={perm("actions","create")} canEdit={perm("actions","edit")} canDelete={perm("actions","delete")} canAssign={perm("actions","assign")} tenantId={currentOrg?.id ?? null} isReal={!!user?._isReal} />;
       case "quizzes":           return <QuizzesScreen role={gameRole} onNav={navigate} quizzes={quizzes} onEditQuiz={handleEditQuiz} onDeleteQuiz={handleDeleteQuiz} onToggleFavorite={handleToggleFavorite} onToggleActive={handleToggleActive} pendingQuizId={pendingQuizId} onClearPendingQuiz={() => setPendingQuizId(null)} canCreate={perm("actions","create")} canEdit={perm("actions","edit")} canDelete={perm("actions","delete")} canLaunch={perm("actions","launch")} />;

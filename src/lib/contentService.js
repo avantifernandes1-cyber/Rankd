@@ -299,6 +299,77 @@ export async function deleteQuiz(quizId) {
 
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ASSIGNMENTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Normalise a DB row → app assignment shape */
+function dbToAssignment(row) {
+  return {
+    id:          row.id,
+    contentType: row.content_type,
+    contentId:   row.content_id,
+    assignedTo:  row.assigned_to ?? {},
+    dueAt:       row.due_at ?? "Open",
+    required:    row.required ?? false,
+    assignedAt:  row.assigned_at
+      ? new Date(row.assigned_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })
+      : "—",
+  };
+}
+
+/**
+ * Fetch all assignments for a tenant.
+ * @param {string} tenantId
+ * @returns {Promise<{ data: Object[]|null, error: Object|null }>}
+ */
+export async function getTenantAssignments(tenantId) {
+  const { data, error } = await supabase
+    .from("tenant_assignments")
+    .select("*")
+    .eq("tenant_id", tenantId)
+    .order("assigned_at", { ascending: false });
+  return { data: data ? data.map(dbToAssignment) : null, error };
+}
+
+/**
+ * Create a new assignment.
+ * @param {string} tenantId
+ * @param {Object} assignment - { contentType, contentId, assignedTo, dueAt, required }
+ * @param {string} [userId]
+ * @returns {Promise<{ data: Object|null, error: Object|null }>}
+ */
+export async function createAssignment(tenantId, assignment, userId) {
+  const { data, error } = await supabase
+    .from("tenant_assignments")
+    .insert({
+      tenant_id:    tenantId,
+      content_type: assignment.contentType,
+      content_id:   assignment.contentId,
+      assigned_to:  assignment.assignedTo ?? {},
+      due_at:       assignment.dueAt && assignment.dueAt !== "Open" ? assignment.dueAt : null,
+      required:     assignment.required ?? false,
+      assigned_by:  userId ?? null,
+    })
+    .select()
+    .single();
+  return { data: data ? dbToAssignment(data) : null, error };
+}
+
+/**
+ * Delete an assignment by id.
+ * @param {string} assignmentId
+ * @returns {Promise<{ error: Object|null }>}
+ */
+export async function deleteAssignment(assignmentId) {
+  const { error } = await supabase
+    .from("tenant_assignments")
+    .delete()
+    .eq("id", assignmentId);
+  return { error };
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
 // LESSON COMPLETIONS
 // ─────────────────────────────────────────────────────────────────────────────
 
