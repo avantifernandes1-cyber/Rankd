@@ -83,7 +83,10 @@ const PLAYER_EMOJIS = ["🦊","🐯","🦁","🐺","🦅","🐬","🦄","🐉","
 const PLAYER_COLORS = ["#F97316","#3B82F6","#10B981","#8B5CF6","#F43F5E","#EAB308","#0EA5E9","#EC4899","#84CC16","#6366F1","#F59E0B","#14B8A6","#EF4444","#A855F7","#22C55E"];
 
 function useGameChannel(pin, role) {
-  const channelRef              = useRef(null);
+  const channelRef       = useRef(null);
+  // Buffer for the player's track payload — flushed once the channel is SUBSCRIBED.
+  // Fixes the race where ch.track() is called before the WebSocket handshake completes.
+  const pendingTrackRef  = useRef(null);
   const [chPlayers, setChPlayers] = useState([]);
   const [chAnswers, setChAnswers] = useState({});   // { playerId: { optionIdx, timeMs, name, text } }
   const [chMsg,     setChMsg]     = useState(null); // latest inbound broadcast for player side
@@ -141,12 +144,20 @@ function useGameChannel(pin, role) {
       }
     });
 
-    channel.subscribe();
     channelRef.current = channel;
+    channel.subscribe((status) => {
+      // Once subscribed, flush any track that was queued before the WebSocket was ready.
+      if (status === 'SUBSCRIBED' && pendingTrackRef.current) {
+        console.log("[ralli:channel] SUBSCRIBED — flushing pending track:", pendingTrackRef.current);
+        channel.track(pendingTrackRef.current);
+        pendingTrackRef.current = null;
+      }
+    });
 
     return () => {
       supabase.removeChannel(channel);
       channelRef.current = null;
+      pendingTrackRef.current = null;
       setChPlayers([]);
       setChAnswers({});
       setChMsg(null);
@@ -163,15 +174,19 @@ function useGameChannel(pin, role) {
     const { type, ...payload } = msg;
 
     if (type === GM.PLAYER_JOIN) {
-      // Track the player's identity in Presence — host's presence:sync handler
-      // picks this up and updates chPlayers automatically.
-      ch.track({
+      // Buffer the track payload so the subscribe callback can flush it if the
+      // WebSocket isn't ready yet (race condition on lobby mount).
+      const trackData = {
         presenceRole: "user",
         playerId:     payload.player.id,
         name:         payload.player.name,
         emoji:        payload.player.emoji,
         color:        payload.player.color,
-      });
+      };
+      pendingTrackRef.current = trackData;
+      // Also attempt immediately — succeeds if already SUBSCRIBED, is a no-op otherwise.
+      console.log("[ralli:channel] GM.PLAYER_JOIN — attempting track:", trackData);
+      ch.track(trackData);
       return;
     }
 
@@ -1220,7 +1235,8 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, broadcast, chMsg }
   useEffect(() => {
     if (!chMsg) return;
     if (chMsg.type === GM.SHOW_QUESTION) {
-      setQuestion(chMsg.question); setTimeLeft(chMsg.timeLimit);
+      console.log("[ralli:player] SHOW_QUESTION received — type:", chMsg.question?.type, "options:", chMsg.question?.options, "timeLimit:", chMsg.timeLimit);
+      setQuestion(chMsg.question); setTimeLeft(chMsg.timeLimit ?? chMsg.question?.timeLimit ?? 20);
       setSelectedIdx(null); setOpenText(""); setOpenSubmitted(false);
       setQStartMs(Date.now()); setPhase("countdown"); setCdNum(3);
     }
@@ -1447,8 +1463,9 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, broadcast, chMsg }
         <h2 style={{ margin: 0, fontSize: 18, fontWeight: 900, color: C.text, lineHeight: 1.3 }}>{question?.q}</h2>
       </div>
 
-      {/* Open-ended text input */}
+      {/* Answer input — varies by question type */}
       {isOpen ? (
+        /* Open-ended — large textarea */
         <div style={{ flex: 1, padding: "0 16px 24px", display: "flex", flexDirection: "column", gap: 12 }}>
           <textarea
             value={openText}
@@ -1474,14 +1491,52 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, broadcast, chMsg }
             </button>
           ) : (
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", borderRadius: 12, background: "rgba(139,92,246,0.1)", border: "1px solid rgba(139,92,246,0.25)" }}>
-                            <p style={{ margin: 0, fontSize: 14, color: "rgba(255,255,255,0.6)", fontWeight: 600 }}>Submitted — waiting for host to review</p>
+              <p style={{ margin: 0, fontSize: 14, color: "rgba(255,255,255,0.6)", fontWeight: 600 }}>Submitted — waiting for host to review</p>
             </div>
           )}
         </div>
-      ) : (
-        /* MC answer options */
+      ) : question?.type === "type" ? (
+        /* Type-answer — single text input */
+        <div style={{ flex: 1, padding: "0 16px 24px", display: "flex", flexDirection: "column", gap: 12 }}>
+          <input
+            type="text"
+            value={openText}
+            onChange={e => !openSubmitted && setOpenText(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === "Enter" && openText.trim() && !openSubmitted) {
+                const timeMs = Date.now() - (qStartMs ?? Date.now());
+                setOpenSubmitted(true);
+                broadcast({ type: GM.ANSWER, playerId, name: playerName, text: openText.trim(), optionIdx: null, timeMs });
+              }
+            }}
+            placeholder="Type your answer…"
+            readOnly={openSubmitted}
+            style={{
+              padding: "18px 20px", borderRadius: 14, outline: "none", fontFamily: "inherit",
+              background: openSubmitted ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.07)",
+              border: `2px solid ${openSubmitted ? "rgba(139,92,246,0.4)" : openText.trim() ? "rgba(253,191,36,0.5)" : "rgba(255,255,255,0.1)"}`,
+              color: "#fff", fontSize: 17, fontWeight: 600, transition: "border-color 0.2s",
+            }}
+          />
+          {!openSubmitted ? (
+            <button onClick={() => {
+              if (!openText.trim()) return;
+              const timeMs = Date.now() - (qStartMs ?? Date.now());
+              setOpenSubmitted(true);
+              broadcast({ type: GM.ANSWER, playerId, name: playerName, text: openText.trim(), optionIdx: null, timeMs });
+            }} style={{ padding: "14px", borderRadius: 14, border: "none", background: openText.trim() ? C.orange : "rgba(255,255,255,0.08)", color: openText.trim() ? "#fff" : "rgba(255,255,255,0.3)", fontWeight: 900, fontSize: 15, cursor: openText.trim() ? "pointer" : "not-allowed", transition: "background 0.2s" }}>
+              {openText.trim() ? "Submit Answer →" : "Type something to submit"}
+            </button>
+          ) : (
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", borderRadius: 12, background: "rgba(139,92,246,0.1)", border: "1px solid rgba(139,92,246,0.25)" }}>
+              <p style={{ margin: 0, fontSize: 14, color: "rgba(255,255,255,0.6)", fontWeight: 600 }}>Submitted — waiting for host</p>
+            </div>
+          )}
+        </div>
+      ) : (question?.options ?? []).length > 0 ? (
+        /* MC / TF — options grid */
         <div style={{ flex: 1, padding: "0 16px 24px", display: "flex", flexDirection: "column", gap: 10 }}>
-          {(question?.options ?? []).map((opt, i) => {
+          {question.options.map((opt, i) => {
             const isSelected = selectedIdx === i;
             return (
               <button key={i} onClick={() => handleAnswer(i)} style={{
@@ -1500,6 +1555,13 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, broadcast, chMsg }
               </button>
             );
           })}
+        </div>
+      ) : (
+        /* Fallback: question type not fully supported in player view */
+        <div style={{ flex: 1, padding: "0 16px 24px", display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", gap: 12 }}>
+          <p style={{ margin: 0, fontSize: 14, color: "rgba(255,255,255,0.45)", textAlign: "center" }}>
+            Answer on host screen · type: {question?.type ?? "unknown"}
+          </p>
         </div>
       )}
     </div>
