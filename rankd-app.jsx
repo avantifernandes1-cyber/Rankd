@@ -1297,26 +1297,32 @@ function KahootHostView({ onNav, sessionName, pin, sessionDbId, tenantId, questi
       {/* Answer options */}
       <div style={{ flex: 1, padding: "0 40px 20px", display: "flex", flexDirection: "column", gap: 10 }}>
         {(q.options ?? []).map((opt, i) => {
+          const OPTION_COLORS = ["#EF4444", "#3B82F6", "#F59E0B", "#22C55E"];
+          const optColor = OPTION_COLORS[i % OPTION_COLORS.length];
           const isCorrect = phase === "reveal" && i === q.correct;
           const isWrong   = phase === "reveal" && i !== q.correct;
           const pct = playerCount > 0 ? Math.round((dist[i] / playerCount) * 100) : 0;
+          // During reveal: correct = vivid green, wrong = dimmed colored card
+          const bgColor = isCorrect ? "#059669" : optColor;
           return (
             <div key={i} style={{
               borderRadius: 14, padding: "14px 18px",
-              background: isCorrect ? "rgba(16,185,129,0.12)" : isWrong ? "rgba(255,255,255,0.5)" : "#fff",
-              border: `2px solid ${isCorrect ? "rgba(16,185,129,0.5)" : isWrong ? C.border : C.border}`,
-              opacity: isWrong ? 0.5 : 1, transition: "opacity 0.3s", boxShadow: isCorrect ? "0 0 20px rgba(16,185,129,0.25)" : "none",
+              background: bgColor,
+              border: `3px solid ${isCorrect ? "#34D399" : "transparent"}`,
+              opacity: isWrong ? 0.35 : 1,
+              transition: "opacity 0.3s",
+              boxShadow: isCorrect ? "0 0 24px rgba(16,185,129,0.4)" : "0 2px 8px rgba(0,0,0,0.15)",
             }}>
               <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: phase === "reveal" ? 8 : 0 }}>
-                <div style={{ width: 28, height: 28, borderRadius: 8, background: isCorrect ? "rgba(16,185,129,0.2)" : "rgba(255,255,255,0.08)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 900, color: isCorrect ? C.green : "rgba(255,255,255,0.4)", flexShrink: 0 }}>
+                <div style={{ width: 28, height: 28, borderRadius: 8, background: "rgba(0,0,0,0.2)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 900, color: "#fff", flexShrink: 0 }}>
                   {isCorrect ? "✓" : String.fromCharCode(65 + i)}
                 </div>
-                <span style={{ fontSize: 15, fontWeight: 700, color: isCorrect ? "#059669" : C.text, flex: 1 }}>{opt}</span>
-                {phase === "reveal" && <span style={{ fontSize: 13, fontWeight: 700, color: C.textMuted }}>{dist[i]} · {pct}%</span>}
+                <span style={{ fontSize: 15, fontWeight: 700, color: "#fff", flex: 1 }}>{opt}</span>
+                {phase === "reveal" && <span style={{ fontSize: 13, fontWeight: 700, color: "rgba(255,255,255,0.85)" }}>{dist[i]} · {pct}%</span>}
               </div>
               {phase === "reveal" && (
-                <div style={{ height: 4, borderRadius: 2, background: "rgba(255,255,255,0.1)" }}>
-                  <div style={{ height: "100%", width: `${pct}%`, borderRadius: 2, background: isCorrect ? C.green : "rgba(255,255,255,0.25)", transition: "width 0.6s" }} />
+                <div style={{ height: 4, borderRadius: 2, background: "rgba(0,0,0,0.2)" }}>
+                  <div style={{ height: "100%", width: `${pct}%`, borderRadius: 2, background: "rgba(255,255,255,0.6)", transition: "width 0.6s" }} />
                 </div>
               )}
             </div>
@@ -1690,9 +1696,10 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, sessionDbId, broad
             readOnly={openSubmitted}
             style={{
               padding: "18px 20px", borderRadius: 14, outline: "none", fontFamily: "inherit",
-              background: openSubmitted ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.07)",
-              border: `2px solid ${openSubmitted ? "rgba(139,92,246,0.4)" : openText.trim() ? "rgba(253,191,36,0.5)" : "rgba(255,255,255,0.1)"}`,
-              color: "#fff", fontSize: 17, fontWeight: 600, transition: "border-color 0.2s",
+              background: openSubmitted ? "#F5F3FF" : "#fff",
+              border: `2px solid ${openSubmitted ? PURPLE + "60" : openText.trim() ? C.orange : C.border}`,
+              color: C.text, fontSize: 17, fontWeight: 600, transition: "border-color 0.2s",
+              boxShadow: "0 2px 8px rgba(0,0,0,0.06)",
             }}
           />
           {!openSubmitted ? (
@@ -1701,12 +1708,12 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, sessionDbId, broad
               const timeMs = Date.now() - (qStartMs ?? Date.now());
               setOpenSubmitted(true);
               broadcast({ type: GM.ANSWER, playerId, name: playerName, text: openText.trim(), optionIdx: null, timeMs });
-            }} style={{ padding: "14px", borderRadius: 14, border: "none", background: openText.trim() ? C.orange : "rgba(255,255,255,0.08)", color: openText.trim() ? "#fff" : "rgba(255,255,255,0.3)", fontWeight: 900, fontSize: 15, cursor: openText.trim() ? "pointer" : "not-allowed", transition: "background 0.2s" }}>
+            }} style={{ padding: "14px", borderRadius: 14, border: "none", background: openText.trim() ? C.orange : C.muted, color: openText.trim() ? "#fff" : C.textMuted, fontWeight: 900, fontSize: 15, cursor: openText.trim() ? "pointer" : "not-allowed", transition: "background 0.2s" }}>
               {openText.trim() ? "Submit Answer →" : "Type something to submit"}
             </button>
           ) : (
-            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", borderRadius: 12, background: "rgba(139,92,246,0.1)", border: "1px solid rgba(139,92,246,0.25)" }}>
-              <p style={{ margin: 0, fontSize: 14, color: "rgba(255,255,255,0.6)", fontWeight: 600 }}>Submitted — waiting for host</p>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", borderRadius: 12, background: "#F5F3FF", border: `1px solid ${PURPLE}44` }}>
+              <p style={{ margin: 0, fontSize: 14, color: PURPLE, fontWeight: 700 }}>Submitted — waiting for host</p>
             </div>
           )}
         </div>
