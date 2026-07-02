@@ -921,6 +921,17 @@ function KahootHostView({ onNav, sessionName, pin, sessionDbId, tenantId, questi
   const [paused,     setPaused]     = useState(false);
   const [showEndConfirm, setShowEndConfirm] = useState(false);
   const [questionHistory, setQuestionHistory] = useState([]);
+  // DB-backed participant count for countdown — presence may lag behind actual joins
+  const [dbParticipantCount, setDbParticipantCount] = useState(chPlayers.length);
+
+  useEffect(() => {
+    if (!sessionDbId) return;
+    getLobbyParticipants(sessionDbId).then(({ data }) => {
+      if (!data) return;
+      const active = data.filter(p => !p.status || p.status === "joined" || p.status === "active").length;
+      setDbParticipantCount(Math.max(active, chPlayers.length));
+    });
+  }, [sessionDbId, chPlayers.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Persist phase transitions to DB so host can recover on refresh
   const persistPhase = useCallback((nextPhase, nextQIdx, nextPaused) => {
@@ -975,6 +986,39 @@ function KahootHostView({ onNav, sessionName, pin, sessionDbId, tenantId, questi
       setPhase("open-review");
       persistPhase("open-review", qIdx, false);
       broadcast({ type: GM.OPEN_REVIEW, qText: q.q });
+      return;
+    }
+    if (q.type === "type") {
+      // Auto-grade typed answers against acceptedAnswers (case-insensitive)
+      const accepted = (q.acceptedAnswers ?? []).map(a => a.toLowerCase().trim());
+      const qDist = []; // no option distribution for type questions
+      setQuestionHistory(h => [...h, { qIdx, q: q?.q, options: [], correct: null, distribution: qDist, correctCount: 0, totalAnswers: Object.values(chAnswers).length, avgTimeMs: 0 }]);
+      let baseScores;
+      if (scores.length > 0) { baseScores = scores; }
+      else if (chPlayers.length > 0) { baseScores = chPlayers.map(p => ({ ...p, score: 0 })); }
+      else { baseScores = Object.entries(chAnswers).map(([pid, ans], i) => ({ id: pid, name: ans.name ?? pid, emoji: PLAYER_EMOJIS[i % PLAYER_EMOJIS.length], color: PLAYER_COLORS[i % PLAYER_COLORS.length], score: 0 })); }
+      const newScores = baseScores.map(p => {
+        const ans = chAnswers[p.id];
+        if (!ans?.text) return { ...p, delta: 0, wasCorrect: false };
+        const correct = accepted.length > 0 && accepted.some(a => ans.text.toLowerCase().trim() === a);
+        const speedBonus = correct && ans.timeMs ? Math.max(0, Math.round((1 - ans.timeMs / (q.timeLimit * 1000)) * 50)) : 0;
+        const delta = correct ? 100 + speedBonus : 0;
+        return { ...p, score: p.score + delta, delta, wasCorrect: correct };
+      });
+      newScores.sort((a, b) => b.score - a.score);
+      setScores(newScores);
+      setPhase("reveal");
+      persistPhase("reveal", qIdx, false);
+      broadcast({ type: GM.REVEAL, correctIdx: null, scores: newScores, acceptedAnswers: q.acceptedAnswers ?? [] });
+      if (sessionDbId) {
+        const scoreMap = Object.fromEntries(newScores.map(p => [p.id, p]));
+        const answerRows = Object.entries(chAnswers).map(([pid, ans]) => {
+          const sp = scoreMap[pid];
+          const correct = (q.acceptedAnswers ?? []).some(a => (ans.text ?? "").toLowerCase().trim() === a.toLowerCase().trim());
+          return { playerId: pid, playerName: ans.name ?? sp?.name ?? pid, questionIdx: qIdx, optionIdx: null, text: ans.text ?? null, timeMs: ans.timeMs ?? null, isCorrect: correct, points: sp?.delta ?? 0, tenantId };
+        });
+        saveGameAnswers(sessionDbId, answerRows).then(({ error }) => { if (error) console.error("[ralli:host] saveGameAnswers (type) failed:", error); });
+      }
       return;
     }
     // Record per-question stats
@@ -1188,7 +1232,7 @@ function KahootHostView({ onNav, sessionName, pin, sessionDbId, tenantId, questi
         </div>
         <div style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 10, padding: "8px 18px", borderRadius: 12, background: C.cardBg, border: `1px solid ${C.creamBorder}` }}>
           <span style={{ fontSize: 13, fontWeight: 800, letterSpacing: "0.1em", color: C.text }}>PIN: {pin}</span>
-          <span style={{ fontSize: 13, color: C.textMuted }}>· {chPlayers.length} players</span>
+          <span style={{ fontSize: 13, color: C.textMuted }}>· {dbParticipantCount} player{dbParticipantCount !== 1 ? "s" : ""}</span>
         </div>
       </div>
     );
@@ -1294,8 +1338,48 @@ function KahootHostView({ onNav, sessionName, pin, sessionDbId, tenantId, questi
         <h2 style={{ margin: 0, fontSize: 24, fontWeight: 900, color: C.text, lineHeight: 1.3 }}>{q.q}</h2>
       </div>
 
-      {/* Answer options */}
-      <div style={{ flex: 1, padding: "0 40px 20px", display: "flex", flexDirection: "column", gap: 10 }}>
+      {/* Answer options — type question shows accepted-answer panel, not a grid */}
+      {q.type === "type" && (
+        <div style={{ flex: 1, padding: "0 40px 20px", display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ padding: "18px 22px", borderRadius: 14, background: "#fff", border: `1px solid ${C.border}` }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: C.textMuted, letterSpacing: "0.08em", marginBottom: 8 }}>ACCEPTED ANSWER{(q.acceptedAnswers?.length ?? 0) > 1 ? "S" : ""}</div>
+            {(q.acceptedAnswers ?? []).length > 0
+              ? <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {q.acceptedAnswers.map((a, i) => (
+                    <span key={i} style={{ padding: "6px 14px", borderRadius: 8, background: "#D1FAE5", color: "#059669", fontSize: 14, fontWeight: 700 }}>{a}</span>
+                  ))}
+                </div>
+              : <span style={{ fontSize: 14, color: C.textMuted, fontStyle: "italic" }}>Accepted answer not provided.</span>
+            }
+          </div>
+          {phase === "reveal" && (
+            <div style={{ padding: "14px 18px", borderRadius: 14, background: C.white, border: `1px solid ${C.border}` }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: C.textMuted, letterSpacing: "0.08em", marginBottom: 10 }}>PLAYER RESPONSES</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {Object.entries(chAnswers).map(([pid, ans], i) => {
+                  const accepted = (q.acceptedAnswers ?? []).map(a => a.toLowerCase().trim());
+                  const correct  = accepted.length > 0 && accepted.some(a => (ans.text ?? "").toLowerCase().trim() === a);
+                  return (
+                    <div key={pid} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderRadius: 10, background: correct ? "#D1FAE5" : "#FEF2F2" }}>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: correct ? "#059669" : C.red }}>{correct ? "✓" : "✗"}</span>
+                      <span style={{ fontSize: 13, color: C.text, flex: 1 }}>{ans.text ?? <em style={{ color: C.textMuted }}>No response</em>}</span>
+                      <span style={{ fontSize: 11, color: C.textSub }}>{ans.name}</span>
+                    </div>
+                  );
+                })}
+                {Object.keys(chAnswers).length === 0 && <span style={{ fontSize: 13, color: C.textMuted, fontStyle: "italic" }}>No responses received.</span>}
+              </div>
+            </div>
+          )}
+          {phase !== "reveal" && (
+            <div style={{ padding: "12px 18px", borderRadius: 12, background: C.muted, display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{answeredCount}</span>
+              <span style={{ fontSize: 13, color: C.textSub }}>of {playerCount} answered</span>
+            </div>
+          )}
+        </div>
+      )}
+      <div style={{ flex: q.type === "type" ? 0 : 1, padding: "0 40px 20px", display: q.type === "type" ? "none" : "flex", flexDirection: "column", gap: 10 }}>
         {(q.options ?? []).map((opt, i) => {
           const OPTION_COLORS = ["#EF4444", "#3B82F6", "#F59E0B", "#22C55E"];
           const optColor = OPTION_COLORS[i % OPTION_COLORS.length];
@@ -1397,7 +1481,17 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, sessionDbId, broad
     if (chMsg.type === GM.OPEN_REVIEW) { setPhase("open-waiting"); }
     if (chMsg.type === GM.REVEAL) {
       setPhase("reveal");
-      setIsCorrect(chMsg.isOpen ? null : selectedIdx === chMsg.correctIdx);
+      let revealCorrect;
+      if (chMsg.isOpen) {
+        revealCorrect = null; // open-ended — host graded
+      } else if (Array.isArray(chMsg.acceptedAnswers)) {
+        // Type-answer: check typed text against accepted answers
+        const acc = chMsg.acceptedAnswers.map(a => a.toLowerCase().trim());
+        revealCorrect = acc.length > 0 && acc.some(a => openText.toLowerCase().trim() === a);
+      } else {
+        revealCorrect = selectedIdx === chMsg.correctIdx;
+      }
+      setIsCorrect(revealCorrect);
       const me = chMsg.scores?.find(p => p.id === playerId) ?? chMsg.scores?.find(p => p.name === playerName);
       if (me) { setMyScore(me.score); setMyDelta(me.delta); setMyRank(chMsg.scores.indexOf(me) + 1); }
     }
@@ -1547,18 +1641,25 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, sessionDbId, broad
   }
 
   if (phase === "answered" || phase === "reveal") {
-    const showResult = phase === "reveal";
+    const showResult  = phase === "reveal";
+    const hasAnswer   = selectedIdx !== null || openSubmitted;
+    const answerLabel = selectedIdx !== null
+      ? question?.options?.[selectedIdx]
+      : openText || "—";
+    const answerBadge = selectedIdx !== null
+      ? String.fromCharCode(65 + selectedIdx)
+      : "✎";
     return (
       <div style={{ minHeight: "100%", background: C.cream, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 20, padding: 32 }}>
-        {selectedIdx !== null ? (
+        {hasAnswer ? (
           <>
-            <div style={{ padding: "16px 24px", borderRadius: 16, background: C.cardBg, border: `1.5px solid ${showResult ? (isCorrect ? "#BBF7D0" : "#FECACA") : C.creamBorder}`, textAlign: "center", maxWidth: 360, width: "100%" }}>
+            <div style={{ padding: "16px 24px", borderRadius: 16, background: C.cardBg, border: `1.5px solid ${showResult ? (isCorrect ? "#BBF7D0" : isCorrect === false ? "#FECACA" : C.creamBorder) : C.creamBorder}`, textAlign: "center", maxWidth: 360, width: "100%" }}>
               <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", color: C.textMuted, textTransform: "uppercase", marginBottom: 8 }}>Your answer</div>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <div style={{ width: 32, height: 32, borderRadius: 8, background: showResult ? (isCorrect ? C.trueGreenBg : "#FEF2F2") : C.cream, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 900, color: showResult ? (isCorrect ? C.trueGreen : C.red) : C.orange }}>
-                  {showResult ? (isCorrect ? "✓" : "✗") : String.fromCharCode(65 + selectedIdx)}
+                <div style={{ width: 32, height: 32, borderRadius: 8, background: showResult ? (isCorrect ? C.trueGreenBg : isCorrect === false ? "#FEF2F2" : C.cream) : C.cream, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 900, color: showResult ? (isCorrect ? C.trueGreen : isCorrect === false ? C.red : C.orange) : C.orange, flexShrink: 0 }}>
+                  {showResult && selectedIdx !== null ? (isCorrect ? "✓" : "✗") : answerBadge}
                 </div>
-                <span style={{ fontSize: 15, fontWeight: 700, color: C.text }}>{question?.options?.[selectedIdx]}</span>
+                <span style={{ fontSize: 15, fontWeight: 700, color: C.text, textAlign: "left" }}>{answerLabel}</span>
               </div>
             </div>
             {!showResult && (
@@ -1689,6 +1790,7 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, sessionDbId, broad
               if (e.key === "Enter" && openText.trim() && !openSubmitted) {
                 const timeMs = Date.now() - (qStartMs ?? Date.now());
                 setOpenSubmitted(true);
+                setPhase("answered");
                 broadcast({ type: GM.ANSWER, playerId, name: playerName, text: openText.trim(), optionIdx: null, timeMs });
               }
             }}
@@ -1707,13 +1809,14 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, sessionDbId, broad
               if (!openText.trim()) return;
               const timeMs = Date.now() - (qStartMs ?? Date.now());
               setOpenSubmitted(true);
+              setPhase("answered");
               broadcast({ type: GM.ANSWER, playerId, name: playerName, text: openText.trim(), optionIdx: null, timeMs });
             }} style={{ padding: "14px", borderRadius: 14, border: "none", background: openText.trim() ? C.orange : C.muted, color: openText.trim() ? "#fff" : C.textMuted, fontWeight: 900, fontSize: 15, cursor: openText.trim() ? "pointer" : "not-allowed", transition: "background 0.2s" }}>
               {openText.trim() ? "Submit Answer →" : "Type something to submit"}
             </button>
           ) : (
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", borderRadius: 12, background: "#F5F3FF", border: `1px solid ${PURPLE}44` }}>
-              <p style={{ margin: 0, fontSize: 14, color: PURPLE, fontWeight: 700 }}>Submitted — waiting for host</p>
+              <p style={{ margin: 0, fontSize: 14, color: PURPLE, fontWeight: 700 }}>✓ Submitted — waiting for host</p>
             </div>
           )}
         </div>
@@ -3560,6 +3663,8 @@ function RankdJoinPanel({ onJoin, sessions, currentUser }) {
 // ── RANKD ADMIN PANEL ────────────────────────────────────────
 
 function RankdAdminPanel({ onNav, sessions, onLaunch, onViewResults, onRelaunch }) {
+  const [tab, setTab] = useState("new");
+
   const statusColors = {
     waiting:   { bg: C.limeBg,       text: "#059669",  label: "Waiting"   },
     live:      { bg: C.orangeLight,   text: C.orange,   label: "Live"      },
@@ -3568,67 +3673,107 @@ function RankdAdminPanel({ onNav, sessions, onLaunch, onViewResults, onRelaunch 
     completed: { bg: C.muted,         text: C.textSub,  label: "Completed" },
   };
 
+  const activeSessions = sessions.filter(s => s.status !== "ended" && s.status !== "completed");
+  const pastSessions   = sessions.filter(s => s.status === "ended"  || s.status === "completed");
+
+  const SessionRow = ({ s }) => {
+    const sc  = statusColors[s.status] ?? { bg: C.muted, text: C.textSub, label: s.status ?? "Unknown" };
+    const isPast = s.status === "ended" || s.status === "completed";
+    return (
+      <div style={{
+        display: "flex", alignItems: "center", gap: 16, padding: 20, borderRadius: 16,
+        background: C.white, border: `1px solid ${C.border}`,
+        boxShadow: "0 2px 8px rgba(27,45,82,0.04)",
+      }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+            <h3 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: C.text }}>{s.name}</h3>
+            <span style={{ fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 99, background: sc.bg, color: sc.text }}>{sc.label}</span>
+          </div>
+          <div style={{ display: "flex", gap: 14, fontSize: 11, color: C.textSub }}>
+            <span>{s.playerCount ?? 0} players</span>
+            <span>{s.questionCount} questions</span>
+            <span style={{ fontWeight: 900, letterSpacing: "0.12em", fontFamily: "monospace", color: C.textMuted }}>PIN: {s.code}</span>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          {isPast ? (
+            <>
+              <button onClick={() => onViewResults(s.code)} style={{ padding: "8px 16px", borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer", background: C.white, color: C.textSub, border: `1px solid ${C.border}` }}>View Results</button>
+              <button onClick={() => onRelaunch(s)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer", background: C.dark, color: "#fff", border: "none" }}>▶ Re-launch</button>
+            </>
+          ) : (
+            <button onClick={() => onLaunch(s)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer", background: C.green, color: "#fff", border: "none" }}>▶ {s.status === "live" || s.status === "started" ? "Resume" : "Launch"}</button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div style={{ padding: 32, maxWidth: 900 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 24 }}>
-        <div>
-          <h2 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: C.text }}>Your Sessions</h2>
-          <p style={{ margin: "2px 0 0", fontSize: 11, color: C.textSub }}>{sessions.length} sessions created</p>
-        </div>
-        <button onClick={() => onNav("rankd-new")} style={{
-          display: "flex", alignItems: "center", gap: 8, padding: "10px 20px",
-          borderRadius: 12, border: "none", cursor: "pointer",
-          fontSize: 13, fontWeight: 700, color: "#fff", background: C.orange,
-        }}>+ New Game</button>
+      {/* Tabs */}
+      <div style={{ display: "flex", gap: 4, marginBottom: 24, background: C.muted, borderRadius: 10, padding: 4, width: "fit-content" }}>
+        {[
+          { id: "new",  label: "Start New Game" },
+          { id: "past", label: "Past Sessions"  },
+        ].map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={{
+            padding: "8px 18px", borderRadius: 8, border: "none", cursor: "pointer",
+            fontSize: 13, fontWeight: 700,
+            background: tab === t.id ? C.white : "transparent",
+            color:      tab === t.id ? C.text  : C.textSub,
+            boxShadow:  tab === t.id ? "0 1px 4px rgba(0,0,0,0.08)" : "none",
+            transition: "all 0.12s",
+          }}>{t.label}</button>
+        ))}
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        {sessions.map(s => {
-          const sc = statusColors[s.status] ?? { bg: C.muted, text: C.textSub, label: s.status ?? "Unknown" };
-          return (
-            <div key={s.code} style={{
-              display: "flex", alignItems: "center", gap: 16, padding: 20, borderRadius: 16,
-              background: C.white, border: `1px solid ${C.border}`,
-              boxShadow: "0 2px 8px rgba(27,45,82,0.04)",
-            }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                  <h3 style={{ margin: 0, fontSize: 13, fontWeight: 700, color: C.text }}>{s.name}</h3>
-                  <span style={{
-                    fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 99,
-                    background: sc.bg, color: sc.text,
-                  }}>{sc.label}</span>
-                </div>
-                <div style={{ display: "flex", gap: 14, fontSize: 11, color: C.textSub }}>
-                  <span>{s.playerCount} players</span>
-                  <span>{s.questionCount} questions</span>
-                  <span style={{ fontWeight: 900, letterSpacing: "0.12em", fontFamily: "monospace", color: C.textMuted }}>PIN: {s.code}</span>
-                </div>
-              </div>
-              <div style={{ display: "flex", gap: 8 }}>
-                {s.status === "ended" ? (
-                  <>
-                    <button onClick={() => onViewResults(s.code)} style={{
-                      padding: "8px 16px", borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer",
-                      background: C.white, color: C.textSub, border: `1px solid ${C.border}`,
-                    }}>View Results</button>
-                    <button onClick={() => onRelaunch(s)} style={{
-                      display: "flex", alignItems: "center", gap: 6,
-                      padding: "8px 16px", borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer",
-                      background: C.dark, color: "#fff", border: "none",
-                    }}>▶ Re-launch</button>
-                  </>
-                ) : (
-                  <button onClick={() => onLaunch(s)} style={{
-                    display: "flex", alignItems: "center", gap: 6,
-                    padding: "8px 16px", borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: "pointer",
-                    background: C.green, color: "#fff", border: "none",
-                  }}>▶ {s.status === "live" ? "Resume" : "Launch"}</button>
-                )}
-              </div>
+
+      {/* Start New Game tab */}
+      {tab === "new" && (
+        <>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+            <div>
+              <h2 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: C.text }}>Active Sessions</h2>
+              <p style={{ margin: "2px 0 0", fontSize: 11, color: C.textSub }}>{activeSessions.length} session{activeSessions.length !== 1 ? "s" : ""}</p>
             </div>
-          );
-        })}
-      </div>
+            <button onClick={() => onNav("rankd-new")} style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 20px", borderRadius: 12, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 700, color: "#fff", background: C.orange }}>+ New Game</button>
+          </div>
+          {activeSessions.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "48px 24px", background: C.pageBg, borderRadius: 14, border: `1px solid ${C.border}` }}>
+              <div style={{ fontSize: 32, marginBottom: 12 }}>🎮</div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: C.text, marginBottom: 6 }}>No active sessions</div>
+              <p style={{ margin: "0 0 20px", fontSize: 13, color: C.textSub }}>Create a new game to get started.</p>
+              <button onClick={() => onNav("rankd-new")} style={{ padding: "10px 24px", borderRadius: 10, border: "none", background: C.orange, color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>+ New Game</button>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {activeSessions.map(s => <SessionRow key={s.code} s={s} />)}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Past Sessions tab */}
+      {tab === "past" && (
+        <>
+          <div style={{ marginBottom: 20 }}>
+            <h2 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: C.text }}>Past Sessions</h2>
+            <p style={{ margin: "2px 0 0", fontSize: 11, color: C.textSub }}>{pastSessions.length} completed session{pastSessions.length !== 1 ? "s" : ""}</p>
+          </div>
+          {pastSessions.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "48px 24px", background: C.pageBg, borderRadius: 14, border: `1px solid ${C.border}` }}>
+              <div style={{ fontSize: 32, marginBottom: 12 }}>📊</div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: C.text, marginBottom: 6 }}>No past sessions yet</div>
+              <p style={{ margin: 0, fontSize: 13, color: C.textSub }}>Completed games will appear here with full analytics, player results, and question breakdowns.</p>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {pastSessions.map(s => <SessionRow key={s.code} s={s} />)}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -12900,8 +13045,14 @@ export default function App() {
       console.log("[ralli:game] createGameSession OK — dbId:", data?.id, "PIN:", session.code);
     }
     // Keep local state (screens still read from sessions array)
-    setSessions(prev => [{ ...session, dbId: data?.id }, ...prev]);
-    setScreen("rankd");
+    const newSession = { ...session, dbId: data?.id };
+    setSessions(prev => [newSession, ...prev]);
+    // Route directly to the lobby so host doesn't have to click Launch again
+    const quiz = quizzes.find(q => q.id === session.quizId);
+    setGameQuestions(quiz?.questions ?? GAME_QUESTIONS);
+    setLobbyPin(session.code);
+    setLobbySessionName(session.name);
+    setScreen("rankd-lobby");
   };
 
   // User: entered PIN → go to name entry
