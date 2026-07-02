@@ -1158,6 +1158,38 @@ function KahootHostView({ onNav, sessionName, pin, sessionDbId, tenantId, questi
     );
   }
 
+  if (phase === "scoreboard") {
+    return (
+      <div style={{ minHeight: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: C.cream, padding: "32px 24px" }}>
+        <div style={{ textAlign: "center", marginBottom: 24 }}>
+          <p style={{ margin: "0 0 6px", fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: C.textMuted }}>
+            {isFinalQ ? "Final Leaderboard" : `After Question ${qIdx + 1} of ${total}`}
+          </p>
+          <h2 style={{ margin: "0 0 12px", fontSize: 26, fontWeight: 900, color: C.text }}>Leaderboard</h2>
+        </div>
+        <div style={{ width: "100%", maxWidth: 540, display: "flex", flexDirection: "column", gap: 8, marginBottom: 28 }}>
+          {scores.map((p, i) => (
+            <div key={p.id ?? p.name} style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 18px", borderRadius: 14, background: C.cardBg, border: `1.5px solid ${C.creamBorder}` }}>
+              <div style={{ width: 32, textAlign: "center", fontSize: i < 3 ? 20 : 13, fontWeight: 700, color: i < 3 ? C.orange : C.textMuted, flexShrink: 0 }}>{i + 1}</div>
+              <span style={{ fontSize: 24, flexShrink: 0 }}>{p.emoji}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: C.text }}>{p.name}</p>
+                <p style={{ margin: 0, fontSize: 12, color: C.textMuted }}>{p.score.toLocaleString()} pts</p>
+              </div>
+              {p.delta > 0
+                ? <div style={{ padding: "4px 12px", borderRadius: 99, background: C.trueGreenBg }}><span style={{ fontSize: 13, fontWeight: 800, color: C.trueGreen }}>+{p.delta.toLocaleString()}</span></div>
+                : <div style={{ padding: "4px 12px", borderRadius: 99, background: "#F3F4F6" }}><span style={{ fontSize: 12, color: C.textMuted }}>+0</span></div>
+              }
+            </div>
+          ))}
+        </div>
+        <button onClick={doNext} style={{ padding: "13px 40px", borderRadius: 14, border: "none", cursor: "pointer", fontSize: 15, fontWeight: 900, color: "#fff", background: C.orange, boxShadow: "0 4px 20px rgba(253,191,36,0.35)" }}>
+          {isFinalQ ? "End Game & View Results →" : `Next Question (${qIdx + 2} / ${total}) →`}
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div style={{ minHeight: "100%", display: "flex", flexDirection: "column", background: C.cream }}>
       {/* Top bar */}
@@ -1206,10 +1238,12 @@ function KahootHostView({ onNav, sessionName, pin, sessionDbId, tenantId, questi
 
       {/* Paused overlay */}
       {paused && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16, zIndex: 100, backdropFilter: "blur(4px)", pointerEvents: "none" }}>
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 20, zIndex: 100, backdropFilter: "blur(4px)" }}>
           <div style={{ fontSize: 56 }}>⏸</div>
           <p style={{ margin: 0, fontSize: 22, fontWeight: 900, color: "#fff" }}>Game Paused</p>
-          <p style={{ margin: 0, fontSize: 14, color: C.textMuted }}>Press ▶ to resume</p>
+          <button onClick={doTogglePause} style={{ marginTop: 4, padding: "14px 36px", borderRadius: 14, border: "none", background: C.orange, color: "#fff", fontSize: 17, fontWeight: 900, cursor: "pointer", display: "flex", alignItems: "center", gap: 10 }}>
+            ▶ Resume
+          </button>
         </div>
       )}
 
@@ -1269,8 +1303,8 @@ function KahootHostView({ onNav, sessionName, pin, sessionDbId, tenantId, questi
               </div>
             ))}
           </div>
-          <button onClick={doNext} style={{ padding: "14px 44px", borderRadius: 18, border: "none", background: isFinalQ ? C.orange : C.orange, color: "#fff", fontWeight: 900, fontSize: 15, cursor: "pointer", boxShadow: `0 0 40px ${isFinalQ ? "rgba(253,191,36,0.4)" : "rgba(253,191,36,0.4)"}` }}>
-            {isFinalQ ? "End Game & View Results →" : `Next Question (${qIdx + 2} / ${total}) →`}
+          <button onClick={() => { broadcast({ type: GM.SCOREBOARD, scores, isFinal: isFinalQ }); setPhase("scoreboard"); persistPhase("scoreboard", qIdx, false); }} style={{ padding: "14px 44px", borderRadius: 18, border: "none", background: C.orange, color: "#fff", fontWeight: 900, fontSize: 15, cursor: "pointer", boxShadow: "0 0 40px rgba(253,191,36,0.4)" }}>
+            Reveal Leaderboard →
           </button>
         </div>
       )}
@@ -1312,7 +1346,7 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, sessionDbId, broad
       console.log("[ralli:player] SHOW_QUESTION received — type:", chMsg.question?.type, "options:", chMsg.question?.options, "timeLimit:", chMsg.timeLimit);
       setQuestion(chMsg.question); setTimeLeft(chMsg.timeLimit ?? chMsg.question?.timeLimit ?? 20);
       setSelectedIdx(null); setOpenText(""); setOpenSubmitted(false);
-      setQStartMs(Date.now()); setPhase("countdown"); setCdNum(3);
+      setQStartMs(Date.now()); setPhase("question");
     }
     if (chMsg.type === GM.OPEN_REVIEW) { setPhase("open-waiting"); }
     if (chMsg.type === GM.REVEAL) {
@@ -1326,6 +1360,7 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, sessionDbId, broad
     if (chMsg.type === GM.PAUSE) { setGamePaused(true); }
     if (chMsg.type === GM.RESUME) { setGamePaused(false); }
     if (chMsg.type === GM.FORCE_END) { setFinalScores(chMsg.scores); setPhase("ended"); }
+    if (chMsg.type === GM.SCOREBOARD) { if (chMsg.scores) setFinalScores(chMsg.scores); setPhase("scoreboard"); }
   }, [chMsg]);
 
   useEffect(() => {
@@ -1390,18 +1425,46 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, sessionDbId, broad
     );
   }
 
-  if (phase === "ended") {
-    const me   = finalScores?.find(p => p.id === playerId);
-    const rank = finalScores ? finalScores.indexOf(me) + 1 : null;
-    const badges = ["1st","2nd","3rd","4th","4th"];
+  if (phase === "scoreboard" || phase === "ended") {
+    const rankBadges = ["1st","2nd","3rd","4th","5th"];
+    const isFinalBoard = phase === "ended";
+    const boardScores  = finalScores ?? [];
+    const myRankIdx    = boardScores.findIndex(p => p.id === playerId);
+    const myRankNum    = myRankIdx >= 0 ? myRankIdx + 1 : null;
     return (
-      <div style={{ minHeight: "100%", background: C.cream, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16, padding: 32 }}>
-        <div style={{ fontSize: 64 }}>{badges[Math.min((rank ?? 5) - 1, 4)]}</div>
-        <h1 style={{ margin: 0, fontSize: 28, fontWeight: 900, color: C.text }}>You finished #{rank}!</h1>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 22px", borderRadius: 99, background: "rgba(253,191,36,0.13)", border: "1px solid rgba(253,191,36,0.3)" }}>
-          <span style={{ fontSize: 18, fontWeight: 900, color: C.orange }}>{me?.score?.toLocaleString() ?? 0} pts</span>
+      <div style={{ minHeight: "100%", background: C.cream, display: "flex", flexDirection: "column" }}>
+        {leaveModal}
+        <div style={{ padding: "16px 20px 14px", background: C.cardBg, borderBottom: `1px solid ${C.border}`, textAlign: "center" }}>
+          <p style={{ margin: "0 0 2px", fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: C.textMuted }}>{isFinalBoard ? "Game Over" : "Leaderboard"}</p>
+          <h2 style={{ margin: "0 0 4px", fontSize: 20, fontWeight: 900, color: C.text }}>{isFinalBoard ? "Final Leaderboard" : "Leaderboard"}</h2>
+          {myRankNum && <p style={{ margin: 0, fontSize: 13, color: C.orange, fontWeight: 700 }}>You finished {myRankNum <= 5 ? rankBadges[myRankNum - 1] : `#${myRankNum}`}!</p>}
         </div>
-        <button onClick={() => onNav("home")} style={{ marginTop: 12, padding: "14px 44px", borderRadius: 18, border: "none", background: C.orange, color: "#fff", fontWeight: 900, fontSize: 15, cursor: "pointer", boxShadow: "0 0 40px rgba(253,191,36,0.4)" }}>Done</button>
+        <div style={{ flex: 1, padding: "16px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
+          {boardScores.map((p, i) => {
+            const isMe = p.id === playerId;
+            return (
+              <div key={p.id ?? i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 18px", borderRadius: 14, background: C.cardBg, border: `1.5px solid ${isMe ? C.orangeBorder : C.creamBorder}`, boxShadow: isMe ? "0 2px 12px rgba(253,191,36,0.12)" : "0 1px 4px rgba(0,0,0,0.04)" }}>
+                <div style={{ width: 32, textAlign: "center", fontSize: i < 3 ? 18 : 13, fontWeight: 700, color: i < 3 ? C.orange : C.textMuted, flexShrink: 0 }}>{i < 5 ? rankBadges[i] : i + 1}</div>
+                <span style={{ fontSize: 22, flexShrink: 0 }}>{p.emoji}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: C.text }}>{p.name}</p>
+                    {isMe && <span style={{ fontSize: 10, fontWeight: 800, padding: "1px 7px", borderRadius: 99, background: C.orange, color: "#fff" }}>YOU</span>}
+                  </div>
+                  <p style={{ margin: 0, fontSize: 12, color: C.textMuted }}>{p.score.toLocaleString()} pts</p>
+                </div>
+                {p.delta > 0 && <div style={{ padding: "4px 10px", borderRadius: 99, background: C.trueGreenBg }}><span style={{ fontSize: 12, fontWeight: 800, color: C.trueGreen }}>+{p.delta.toLocaleString()}</span></div>}
+              </div>
+            );
+          })}
+          {boardScores.length === 0 && <div style={{ textAlign: "center", padding: 40, color: C.textMuted, fontSize: 14 }}>No scores yet</div>}
+        </div>
+        <div style={{ padding: "14px 20px", borderTop: `1px solid ${C.border}` }}>
+          {isFinalBoard
+            ? <button onClick={() => onNav("home")} style={{ width: "100%", padding: "13px", borderRadius: 14, border: "none", background: C.orange, color: "#fff", fontWeight: 900, fontSize: 15, cursor: "pointer", boxShadow: "0 0 32px rgba(253,191,36,0.3)" }}>Done</button>
+            : <p style={{ margin: 0, fontSize: 13, color: C.textSub, textAlign: "center" }}>Waiting for host to continue…</p>
+          }
+        </div>
       </div>
     );
   }
@@ -1611,18 +1674,23 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, sessionDbId, broad
         /* MC / TF — options grid */
         <div style={{ flex: 1, padding: "0 16px 24px", display: "flex", flexDirection: "column", gap: 10 }}>
           {question.options.map((opt, i) => {
+            const OPTION_COLORS = ["#EF4444", "#3B82F6", "#F59E0B", "#22C55E"];
+            const optColor = OPTION_COLORS[i % OPTION_COLORS.length];
             const isSelected = selectedIdx === i;
+            const isLocked = selectedIdx !== null;
             return (
               <button key={i} onClick={() => handleAnswer(i)} style={{
                 width: "100%", padding: "16px 18px", borderRadius: 14,
-                border: `2px solid ${isSelected ? C.orange : "rgba(255,255,255,0.1)"}`,
-                background: isSelected ? "rgba(253,191,36,0.15)" : "rgba(255,255,255,0.06)",
-                color: "#fff", cursor: selectedIdx !== null ? "default" : "pointer",
+                border: `3px solid ${isSelected ? "#fff" : "transparent"}`,
+                background: optColor,
+                color: "#fff", cursor: isLocked ? "default" : "pointer",
                 display: "flex", alignItems: "center", gap: 12, textAlign: "left",
-                opacity: selectedIdx !== null && !isSelected ? 0.5 : 1,
-                transition: "opacity 0.2s, border-color 0.2s, background 0.2s",
+                opacity: isLocked && !isSelected ? 0.45 : 1,
+                transform: isSelected ? "scale(1.02)" : "scale(1)",
+                transition: "opacity 0.2s, transform 0.15s, border-color 0.15s",
+                boxShadow: isSelected ? `0 0 0 3px ${optColor}55, 0 4px 16px rgba(0,0,0,0.3)` : "0 2px 8px rgba(0,0,0,0.2)",
               }}>
-                <div style={{ width: 30, height: 30, borderRadius: 8, flexShrink: 0, background: isSelected ? "rgba(253,191,36,0.25)" : "rgba(255,255,255,0.08)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 900, color: isSelected ? C.orange : "rgba(255,255,255,0.4)" }}>
+                <div style={{ width: 30, height: 30, borderRadius: 8, flexShrink: 0, background: "rgba(0,0,0,0.2)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 900, color: "#fff" }}>
                   {String.fromCharCode(65 + i)}
                 </div>
                 <span style={{ fontSize: 15, fontWeight: 700, lineHeight: 1.3 }}>{opt}</span>
@@ -4014,66 +4082,72 @@ function RankdLobbyScreen({ onNav, pin, playerName, playerEmoji, sessionName, ro
 // ── RANKD RESULTS SCREEN ─────────────────────────────────────
 
 function RankdResultsScreen({ onNav, sessionCode, sessions, gameData }) {
-  const session   = sessions.find(s => s.code === sessionCode) ?? sessions[1];
+  const session   = sessions.find(s => s.code === sessionCode);
   const [tab, setTab] = useState("summary");
-  const [dbScores, setDbScores] = useState(null); // loaded from game_players on refresh
+  const [dbScores, setDbScores] = useState(null);
 
-  // If gameData not in memory (e.g. host refreshed after game ended), load from DB
+  // Load from DB if gameData not in memory (e.g. host refreshed after game ended)
   useEffect(() => {
     if (gameData?.scores || !session?.dbId) return;
     getSessionPlayers(session.dbId).then(({ data }) => {
       if (data?.length) {
-        setDbScores(data.map((p, i) => ({
-          id:         p.player_id,
-          name:       p.name,
-          emoji:      p.emoji ?? "🙂",
-          color:      p.color ?? C.orange,
-          score:      p.final_score ?? 0,
-          delta:      0,
-          wasCorrect: null,
+        setDbScores(data.map((p) => ({
+          id:    p.player_id,
+          name:  p.name,
+          emoji: p.emoji ?? "🙂",
+          color: p.color ?? C.orange,
+          score: p.final_score ?? 0,
+          delta: 0,
         })));
       }
     });
   }, [session?.dbId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Use real game data if available, else fall back to DB scores, else mock
+  // Real data only — no mock fallbacks
   const realScores    = gameData?.scores ?? dbScores ?? null;
   const realQuestions = gameData?.questions ?? null;
   const realQHistory  = gameData?.questionHistory ?? null;
 
   const leaderboard = realScores
-    ? realScores.map((p, i) => ({ rank: i+1, name: p.name, emoji: p.emoji ?? "🙂", score: p.score, accuracy: p.wasCorrect ? 100 : Math.round(Math.random()*30+50) }))
-    : MOCK_RESULTS_LEADERBOARD;
+    ? realScores.map((p, i) => ({ rank: i+1, name: p.name, emoji: p.emoji ?? "🙂", score: p.score }))
+    : [];
 
   const questionBreakdown = realQHistory?.length
     ? realQHistory.map((q, i) => ({
-        q: q.q ?? `Question ${i+1}`,
-        type: realQuestions?.[q.qIdx]?.type ?? "mc",
+        q:       q.q ?? `Question ${i+1}`,
+        type:    Q_TYPE_LABELS[realQuestions?.[q.qIdx]?.type] ?? "Question",
         correct: q.correctCount ?? 0,
-        total: q.totalAnswers ?? leaderboard.length,
-        avgMs: Math.round(q.avgTimeMs ?? 0),
+        total:   q.totalAnswers ?? leaderboard.length,
+        avgMs:   Math.round(q.avgTimeMs ?? 0),
       }))
-    : MOCK_QUESTION_BREAKDOWN.map(q => ({ ...q, avgMs: Math.round(3000 + Math.random()*4000) }));
+    : [];
 
   const podium  = [...leaderboard].sort((a,b) => a.rank - b.rank).slice(0,3);
   const podiumDisplay = podium.length >= 3 ? [podium[1], podium[0], podium[2]] : podium;
   const podiumStyles = [
     { bg: C.orange, glow: "rgba(245,158,11,0.3)",  medal: "1st", height: 110 },
-    { bg: C.dark,     glow: "rgba(27,45,82,0.3)",    medal: "2nd", height: 80  },
-    { bg: C.orange,      glow: "rgba(253,191,36,0.25)", medal: "3rd", height: 64  },
+    { bg: C.dark,   glow: "rgba(27,45,82,0.3)",    medal: "2nd", height: 80  },
+    { bg: C.orange, glow: "rgba(253,191,36,0.25)", medal: "3rd", height: 64  },
   ];
 
-  const avgAccuracy = Math.round(leaderboard.reduce((s, p) => s + p.accuracy, 0) / Math.max(leaderboard.length, 1));
-  const hardestQ    = questionBreakdown.reduce((a, b) => ((a.correct/Math.max(a.total,1)) <= (b.correct/Math.max(b.total,1)) ? a : b), questionBreakdown[0] ?? { q: "-", correct:0, total:1 });
-  const avgResponseMs = Math.round(questionBreakdown.reduce((s,q) => s + (q.avgMs||0), 0) / Math.max(questionBreakdown.length, 1));
+  const avgAccuracy   = questionBreakdown.length
+    ? Math.round(questionBreakdown.reduce((s,q) => s + Math.round((q.correct / Math.max(q.total,1)) * 100), 0) / questionBreakdown.length)
+    : null;
+  const hardestQ      = questionBreakdown.length
+    ? questionBreakdown.reduce((a, b) => (a.correct/Math.max(a.total,1)) <= (b.correct/Math.max(b.total,1)) ? a : b)
+    : null;
+  const avgResponseMs = questionBreakdown.length
+    ? Math.round(questionBreakdown.reduce((s,q) => s + (q.avgMs||0), 0) / questionBreakdown.length)
+    : null;
   const totalPlayers  = leaderboard.length;
 
   const typeColors = {
-    "Multiple Choice": { bg: C.blueBg,    text: "#0284C7" },
-    "True / False":    { bg: C.limeBg,    text: "#059669" },
-    "Type Answer":     { bg: C.orangeLight, text: C.orange },
-    "Slider":          { bg: C.purpleBg,  text: "#7C3AED" },
-    "Puzzle / Match":  { bg: "#FFFBEB",   text: "#D97706" },
+    "Multiple Choice": { bg: C.blueBg,     text: "#0284C7" },
+    "True / False":    { bg: C.limeBg,     text: "#059669" },
+    "Type Answer":     { bg: C.orangeLight, text: C.orange  },
+    "Open Ended":      { bg: C.purpleBg,   text: "#7C3AED" },
+    "Slider":          { bg: C.purpleBg,   text: "#7C3AED" },
+    "Question":        { bg: C.muted,      text: C.textSub },
   };
 
   return (
@@ -4101,7 +4175,7 @@ function RankdResultsScreen({ onNav, sessionCode, sessions, gameData }) {
             <div>
               <h1 style={{ margin: "0 0 6px", fontSize: 22, fontWeight: 900, color: C.dark }}>{session.name}</h1>
               <div style={{ display: "flex", gap: 16, fontSize: 11, color: C.textMuted }}>
-                <span>{session.playerCount || 8} players</span>
+                <span>{totalPlayers || session?.playerCount || 0} players</span>
                 <span>{session.questionCount} questions</span>
                 <span style={{ fontWeight: 900, letterSpacing: "0.1em", fontFamily: "monospace", color: C.dark }}>PIN: {sessionCode}</span>
               </div>
@@ -4138,10 +4212,10 @@ function RankdResultsScreen({ onNav, sessionCode, sessions, gameData }) {
             {/* Overview stats */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14 }}>
               {[
-                { label: "Total Players",       value: String(totalPlayers),                          icon: "", color: C.blue },
-                { label: "Avg Accuracy",        value: `${avgAccuracy}%`,                             icon: "", color: "#059669" },
-                { label: "Avg Response Speed",  value: avgResponseMs >= 1000 ? `${(avgResponseMs/1000).toFixed(1)}s` : `${avgResponseMs}ms`, icon: "", color: C.orange },
-                { label: "Questions",           value: String(questionBreakdown.length),              icon: "", color: "#7C3AED" },
+                { label: "Total Players",       value: totalPlayers > 0 ? String(totalPlayers) : "—",  icon: "", color: C.blue },
+                { label: "Avg Accuracy",        value: avgAccuracy != null ? `${avgAccuracy}%` : "—", icon: "", color: "#059669" },
+                { label: "Avg Response Speed",  value: avgResponseMs != null ? (avgResponseMs >= 1000 ? `${(avgResponseMs/1000).toFixed(1)}s` : `${avgResponseMs}ms`) : "—", icon: "", color: C.orange },
+                { label: "Questions",           value: String(questionBreakdown.length || session?.questionCount || 0), icon: "", color: "#7C3AED" },
               ].map(m => (
                 <Card key={m.label}>
                   {m.icon && <div style={{ width: 32, height: 32, borderRadius: 10, background: m.color + "18", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, marginBottom: 10 }}>{m.icon}</div>}
@@ -4151,16 +4225,18 @@ function RankdResultsScreen({ onNav, sessionCode, sessions, gameData }) {
               ))}
             </div>
             {/* Toughest question */}
-            <Card style={{ border: `1px solid rgba(239,68,68,0.2)` }}>
-              <p style={{ margin: "0 0 8px", fontSize: 10, fontWeight: 700, color: C.red, textTransform: "uppercase", letterSpacing: "0.1em" }}>Toughest Question</p>
-              <p style={{ margin: "0 0 12px", fontSize: 14, fontWeight: 600, color: C.text }}>{hardestQ?.q ?? "—"}</p>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <div style={{ flex: 1, height: 8, borderRadius: 99, background: C.muted, overflow: "hidden" }}>
-                  <div style={{ height: "100%", borderRadius: 99, width: `${Math.round((hardestQ?.correct/Math.max(hardestQ?.total,1))*100)}%`, background: C.red }} />
+            {hardestQ && (
+              <Card style={{ border: `1px solid rgba(239,68,68,0.2)` }}>
+                <p style={{ margin: "0 0 8px", fontSize: 10, fontWeight: 700, color: C.red, textTransform: "uppercase", letterSpacing: "0.1em" }}>Toughest Question</p>
+                <p style={{ margin: "0 0 12px", fontSize: 14, fontWeight: 600, color: C.text }}>{hardestQ.q}</p>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ flex: 1, height: 8, borderRadius: 99, background: C.muted, overflow: "hidden" }}>
+                    <div style={{ height: "100%", borderRadius: 99, width: `${Math.round((hardestQ.correct/Math.max(hardestQ.total,1))*100)}%`, background: C.red }} />
+                  </div>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: C.red, flexShrink: 0 }}>{hardestQ.correct}/{hardestQ.total} correct</span>
                 </div>
-                <span style={{ fontSize: 12, fontWeight: 700, color: C.red, flexShrink: 0 }}>{hardestQ?.correct ?? 0}/{hardestQ?.total ?? 0} correct</span>
-              </div>
-            </Card>
+              </Card>
+            )}
             {/* Question accuracy breakdown */}
             <Card>
               <p style={{ margin: "0 0 14px", fontSize: 10, fontWeight: 700, color: C.textSub, textTransform: "uppercase", letterSpacing: "0.08em" }}>Question Accuracy</p>
@@ -4184,29 +4260,24 @@ function RankdResultsScreen({ onNav, sessionCode, sessions, gameData }) {
         )}
 
         {tab === "players" && (
-          <Card style={{ padding: 0, overflow: "hidden" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "40px 1fr 70px 80px 90px 80px", padding: "10px 20px", borderBottom: `1px solid ${C.border}`, fontSize: 10, fontWeight: 700, color: C.textMuted, letterSpacing: "0.06em", textTransform: "uppercase", background: C.muted }}>
-              <div>#</div><div>Player</div><div style={{ textAlign: "right" }}>Score</div><div style={{ textAlign: "right" }}>Accuracy</div><div style={{ textAlign: "right" }}>Avg Speed</div><div style={{ textAlign: "right" }}>Correct</div>
-            </div>
-            {leaderboard.map((p, i) => {
-              const qCount  = questionBreakdown.length || 1;
-              const correct = Math.round(p.accuracy / 100 * qCount);
-              const avgSpd  = avgResponseMs >= 1000 ? `${(avgResponseMs/1000).toFixed(1)}s` : `${avgResponseMs}ms`;
-              return (
-                <div key={p.name} style={{ display: "grid", gridTemplateColumns: "40px 1fr 70px 80px 90px 80px", padding: "12px 20px", borderBottom: `1px solid ${C.border}`, alignItems: "center" }}>
-                  <span style={{ fontSize: 12, fontWeight: 900, color: p.rank <= 3 ? C.orange : C.textMuted }}>{p.rank}</span>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ fontSize: 18 }}>{p.emoji}</span>
-                    <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{p.name}</span>
-                  </div>
-                  <div style={{ textAlign: "right", fontSize: 14, fontWeight: 900, color: C.text }}>{p.score.toLocaleString()}</div>
-                  <div style={{ textAlign: "right", fontSize: 13, fontWeight: 700, color: p.accuracy >= 80 ? "#059669" : p.accuracy >= 65 ? C.orange : C.red }}>{p.accuracy}%</div>
-                  <div style={{ textAlign: "right", fontSize: 13, color: C.textSub }}>{avgSpd}</div>
-                  <div style={{ textAlign: "right", fontSize: 13, fontWeight: 700, color: C.text }}>{correct}/{qCount}</div>
+          leaderboard.length === 0
+            ? <div style={{ textAlign: "center", padding: 60, color: C.textMuted, fontSize: 14 }}>No player data available</div>
+            : <Card style={{ padding: 0, overflow: "hidden" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "40px 1fr 80px 80px", padding: "10px 20px", borderBottom: `1px solid ${C.border}`, fontSize: 10, fontWeight: 700, color: C.textMuted, letterSpacing: "0.06em", textTransform: "uppercase", background: C.muted }}>
+                  <div>#</div><div>Player</div><div style={{ textAlign: "right" }}>Score</div><div style={{ textAlign: "right" }}>Rank</div>
                 </div>
-              );
-            })}
-          </Card>
+                {leaderboard.map((p) => (
+                  <div key={p.name} style={{ display: "grid", gridTemplateColumns: "40px 1fr 80px 80px", padding: "12px 20px", borderBottom: `1px solid ${C.border}`, alignItems: "center" }}>
+                    <span style={{ fontSize: 12, fontWeight: 900, color: p.rank <= 3 ? C.orange : C.textMuted }}>{p.rank}</span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 18 }}>{p.emoji}</span>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{p.name}</span>
+                    </div>
+                    <div style={{ textAlign: "right", fontSize: 14, fontWeight: 900, color: C.text }}>{p.score.toLocaleString()}</div>
+                    <div style={{ textAlign: "right", fontSize: 13, fontWeight: 700, color: p.rank <= 3 ? C.orange : C.textMuted }}>#{p.rank}</div>
+                  </div>
+                ))}
+              </Card>
         )}
 
         {tab === "leaderboard" && (
@@ -4215,9 +4286,9 @@ function RankdResultsScreen({ onNav, sessionCode, sessions, gameData }) {
             <div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginBottom: 24 }}>
                 {[
-                  { label: "Avg Accuracy", value: `${avgAccuracy}%`, icon: "", color: C.green },
-                  { label: "Top Score",    value: "9,200",           icon: "", color: C.orange },
-                  { label: "Questions",    value: String(MOCK_QUESTION_BREAKDOWN.length), icon: "", color: C.orange },
+                  { label: "Avg Accuracy", value: avgAccuracy != null ? `${avgAccuracy}%` : "—", icon: "", color: C.green },
+                  { label: "Top Score",    value: leaderboard[0]?.score != null ? leaderboard[0].score.toLocaleString() : "—", icon: "", color: C.orange },
+                  { label: "Questions",    value: String(questionBreakdown.length || session?.questionCount || 0), icon: "", color: C.orange },
                 ].map(m => (
                   <Card key={m.label}>
                     {m.icon && (
@@ -4267,7 +4338,7 @@ function RankdResultsScreen({ onNav, sessionCode, sessions, gameData }) {
                 }}>
                   <div>#</div><div>Player</div>
                   <div style={{ textAlign: "right" }}>Score</div>
-                  <div style={{ textAlign: "right" }}>Accuracy</div>
+                  <div style={{ textAlign: "right" }}>Rank</div>
                 </div>
                 {leaderboard.map(p => (
                   <div key={p.name} style={{
@@ -4280,7 +4351,7 @@ function RankdResultsScreen({ onNav, sessionCode, sessions, gameData }) {
                       <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{p.name}</span>
                     </div>
                     <div style={{ textAlign: "right", fontSize: 14, fontWeight: 900, color: C.text }}>{p.score.toLocaleString()}</div>
-                    <div style={{ textAlign: "right", fontSize: 13, fontWeight: 700, color: p.accuracy >= 80 ? "#059669" : p.accuracy >= 65 ? C.orange : C.red }}>{p.accuracy}%</div>
+                    <div style={{ textAlign: "right", fontSize: 13, fontWeight: 700, color: p.rank <= 3 ? C.orange : C.textMuted }}>#{p.rank}</div>
                   </div>
                 ))}
               </Card>
@@ -4294,65 +4365,72 @@ function RankdResultsScreen({ onNav, sessionCode, sessions, gameData }) {
                 border: `1px solid ${C.orangeBorder}`,
               }}>
                 <p style={{ margin: "0 0 12px", fontSize: 10, fontWeight: 700, color: C.dark, textTransform: "uppercase", letterSpacing: "0.1em", opacity: 0.7 }}>MVP</p>
-                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <span style={{ fontSize: 40 }}>{MOCK_RESULTS_LEADERBOARD[0].emoji}</span>
-                  <div>
-                    <p style={{ margin: 0, fontSize: 15, fontWeight: 900, color: C.dark }}>{leaderboard[0]?.name ?? ""}</p>
-                    <p style={{ margin: 0, fontSize: 11, color: C.dark, opacity: 0.65 }}>{leaderboard[0]?.accuracy ?? 0}% accuracy · {leaderboard[0]?.score?.toLocaleString() ?? 0} pts</p>
-                  </div>
-                </div>
-              </div>
-
-              <Card style={{ border: "1px solid rgba(244,63,94,0.2)" }}>
-                <p style={{ margin: "0 0 8px", fontSize: 10, fontWeight: 700, color: "#E11D48", textTransform: "uppercase", letterSpacing: "0.1em" }}>Toughest Question</p>
-                <p style={{ margin: "0 0 10px", fontSize: 13, fontWeight: 600, color: C.text }}>{hardestQ.q}</p>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <div style={{ flex: 1, height: 8, borderRadius: 99, overflow: "hidden", background: C.muted }}>
-                    <div style={{ height: "100%", borderRadius: 99, width: `${(hardestQ.correct/hardestQ.total)*100}%`, background: C.red }} />
-                  </div>
-                  <span style={{ fontSize: 12, fontWeight: 700, color: "#E11D48", flexShrink: 0 }}>{hardestQ.correct}/{hardestQ.total}</span>
-                </div>
-              </Card>
-
-              <Card style={{ border: "1px solid rgba(132,204,22,0.2)" }}>
-                <p style={{ margin: "0 0 10px", fontSize: 10, fontWeight: 700, color: "#059669", textTransform: "uppercase", letterSpacing: "0.1em" }}>Fastest Responder</p>
-                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <span style={{ fontSize: 24 }}>🐯</span>
-                  <div>
-                    <p style={{ margin: 0, fontSize: 13, fontWeight: 700, color: C.text }}>Mia Chen</p>
-                    <p style={{ margin: 0, fontSize: 11, color: C.textSub }}>Avg 5.2s per question</p>
-                  </div>
-                </div>
-              </Card>
-
-              <Card>
-                <p style={{ margin: "0 0 12px", fontSize: 10, fontWeight: 700, color: C.textSub, textTransform: "uppercase", letterSpacing: "0.08em" }}>Score Distribution</p>
-                {[
-                  { range: "90–100%", count: 1, color: C.green  },
-                  { range: "80–89%",  count: 1, color: "#059669" },
-                  { range: "70–79%",  count: 1, color: C.orange  },
-                  { range: "60–69%",  count: 2, color: "#F59E0B" },
-                  { range: "< 60%",   count: 3, color: C.red     },
-                ].map(d => (
-                  <div key={d.range} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, marginBottom: 8 }}>
-                    <span style={{ width: 52, textAlign: "right", color: C.textSub, fontWeight: 500 }}>{d.range}</span>
-                    <div style={{ flex: 1, height: 16, borderRadius: 6, overflow: "hidden", background: C.muted }}>
-                      <div style={{
-                        height: "100%", borderRadius: 6, minWidth: d.count > 0 ? 36 : 0,
-                        width: `${(d.count/8)*100}%`, background: d.color,
-                        display: "flex", alignItems: "center", paddingLeft: 8,
-                        color: "#fff", fontSize: 10, fontWeight: 700,
-                      }}>{d.count}</div>
+                {leaderboard[0] ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <span style={{ fontSize: 40 }}>{leaderboard[0].emoji}</span>
+                    <div>
+                      <p style={{ margin: 0, fontSize: 15, fontWeight: 900, color: C.dark }}>{leaderboard[0].name}</p>
+                      <p style={{ margin: 0, fontSize: 11, color: C.dark, opacity: 0.65 }}>{leaderboard[0].score.toLocaleString()} pts</p>
                     </div>
                   </div>
-                ))}
-              </Card>
+                ) : <p style={{ margin: 0, fontSize: 13, color: C.dark, opacity: 0.5 }}>No data yet</p>}
+              </div>
+
+              {hardestQ && (
+                <Card style={{ border: "1px solid rgba(244,63,94,0.2)" }}>
+                  <p style={{ margin: "0 0 8px", fontSize: 10, fontWeight: 700, color: "#E11D48", textTransform: "uppercase", letterSpacing: "0.1em" }}>Toughest Question</p>
+                  <p style={{ margin: "0 0 10px", fontSize: 13, fontWeight: 600, color: C.text }}>{hardestQ.q}</p>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ flex: 1, height: 8, borderRadius: 99, overflow: "hidden", background: C.muted }}>
+                      <div style={{ height: "100%", borderRadius: 99, width: `${Math.round((hardestQ.correct/Math.max(hardestQ.total,1))*100)}%`, background: C.red }} />
+                    </div>
+                    <span style={{ fontSize: 12, fontWeight: 700, color: "#E11D48", flexShrink: 0 }}>{hardestQ.correct}/{hardestQ.total}</span>
+                  </div>
+                </Card>
+              )}
+
+              {avgResponseMs != null && (
+                <Card style={{ border: "1px solid rgba(132,204,22,0.2)" }}>
+                  <p style={{ margin: "0 0 10px", fontSize: 10, fontWeight: 700, color: "#059669", textTransform: "uppercase", letterSpacing: "0.1em" }}>Avg Response Time</p>
+                  <p style={{ margin: 0, fontSize: 22, fontWeight: 900, color: C.text }}>{avgResponseMs >= 1000 ? `${(avgResponseMs/1000).toFixed(1)}s` : `${avgResponseMs}ms`}</p>
+                  <p style={{ margin: "2px 0 0", fontSize: 11, color: C.textSub }}>per question across all players</p>
+                </Card>
+              )}
+
+              {leaderboard.length > 0 && (() => {
+                const maxScore = leaderboard[0]?.score || 1;
+                const dist = [
+                  { range: "Top 25%",  players: leaderboard.filter(p => p.score >= maxScore * 0.75), color: C.green   },
+                  { range: "50–75%",   players: leaderboard.filter(p => p.score >= maxScore * 0.5 && p.score < maxScore * 0.75), color: C.orange },
+                  { range: "25–50%",   players: leaderboard.filter(p => p.score >= maxScore * 0.25 && p.score < maxScore * 0.5), color: "#F59E0B" },
+                  { range: "< 25%",    players: leaderboard.filter(p => p.score < maxScore * 0.25), color: C.red      },
+                ];
+                return (
+                  <Card>
+                    <p style={{ margin: "0 0 12px", fontSize: 10, fontWeight: 700, color: C.textSub, textTransform: "uppercase", letterSpacing: "0.08em" }}>Score Distribution</p>
+                    {dist.map(d => (
+                      <div key={d.range} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, marginBottom: 8 }}>
+                        <span style={{ width: 52, textAlign: "right", color: C.textSub, fontWeight: 500 }}>{d.range}</span>
+                        <div style={{ flex: 1, height: 16, borderRadius: 6, overflow: "hidden", background: C.muted }}>
+                          <div style={{
+                            height: "100%", borderRadius: 6, minWidth: d.players.length > 0 ? 28 : 0,
+                            width: `${(d.players.length / leaderboard.length) * 100}%`, background: d.color,
+                            display: "flex", alignItems: "center", paddingLeft: 8,
+                            color: "#fff", fontSize: 10, fontWeight: 700,
+                          }}>{d.players.length > 0 ? d.players.length : ""}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </Card>
+                );
+              })()}
             </div>
           </div>
         )}
 
         {tab === "questions" && (
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {questionBreakdown.length === 0 && <div style={{ textAlign: "center", padding: 60, color: C.textMuted, fontSize: 14 }}>No question data available</div>}
             {questionBreakdown.map((q, i) => {
               const pct   = Math.round((q.correct / Math.max(q.total,1)) * 100);
               const color = pct >= 80 ? "#059669" : pct >= 60 ? C.orange : C.red;
@@ -4383,10 +4461,12 @@ function RankdResultsScreen({ onNav, sessionCode, sessions, gameData }) {
                             <div style={{ height: "100%", borderRadius: 99, width: `${pct}%`, background: color }} />
                           </div>
                         </div>
-                        <div style={{ textAlign: "right", flexShrink: 0 }}>
-                          <p style={{ margin: 0, fontSize: 10, color: C.textMuted }}>Avg time</p>
-                          <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: C.text }}>{q.avgTime}s</p>
-                        </div>
+                        {q.avgMs > 0 && (
+                          <div style={{ textAlign: "right", flexShrink: 0 }}>
+                            <p style={{ margin: 0, fontSize: 10, color: C.textMuted }}>Avg time</p>
+                            <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: C.text }}>{(q.avgMs / 1000).toFixed(1)}s</p>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
