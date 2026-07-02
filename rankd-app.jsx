@@ -963,7 +963,20 @@ function KahootHostView({ onNav, sessionName, pin, sessionDbId, tenantId, questi
     setQuestionHistory(h => [...h, { qIdx, q: q?.q, options: q?.options, correct: q?.correct, distribution: qDist, correctCount: qDist[q?.correct]||0, totalAnswers: qTotal, avgTimeMs: qAvgMs }]);
     setPhase("reveal");
     persistPhase("reveal", qIdx, false);
-    const baseScores = scores.length > 0 ? scores : chPlayers.map(p => ({ ...p, score: 0 }));
+    // Tri-level fallback: scores state → presence chPlayers → chAnswers keys (always populated at this point)
+    let baseScores;
+    if (scores.length > 0) {
+      baseScores = scores;
+    } else if (chPlayers.length > 0) {
+      baseScores = chPlayers.map(p => ({ ...p, score: 0 }));
+    } else {
+      baseScores = Object.entries(chAnswers).map(([pid, ans], i) => ({
+        id: pid, name: ans.name ?? pid,
+        emoji: PLAYER_EMOJIS[i % PLAYER_EMOJIS.length],
+        color: PLAYER_COLORS[i % PLAYER_COLORS.length],
+        score: 0,
+      }));
+    }
     const newScores = baseScores.map(p => {
       const ans = chAnswers[p.id];
       if (!ans) return { ...p, delta: 0, wasCorrect: false };
@@ -1358,10 +1371,10 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, sessionDbId, broad
     if (chMsg.type === GM.REVEAL) {
       setPhase("reveal");
       setIsCorrect(chMsg.isOpen ? null : selectedIdx === chMsg.correctIdx);
-      const me = chMsg.scores?.find(p => p.id === playerId);
+      const me = chMsg.scores?.find(p => p.id === playerId) ?? chMsg.scores?.find(p => p.name === playerName);
       if (me) { setMyScore(me.score); setMyDelta(me.delta); setMyRank(chMsg.scores.indexOf(me) + 1); }
     }
-    if (chMsg.type === GM.NEXT_QUESTION) { setPhase("waiting"); setIsCorrect(null); setGamePaused(false); }
+    if (chMsg.type === GM.NEXT_QUESTION) { setCdNum(3); setIsCorrect(null); setGamePaused(false); setPhase("countdown"); }
     if (chMsg.type === GM.GAME_END) { setFinalScores(chMsg.scores); setPhase("ended"); }
     if (chMsg.type === GM.PAUSE) { setGamePaused(true); }
     if (chMsg.type === GM.RESUME) { setGamePaused(false); }
@@ -1371,7 +1384,7 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, sessionDbId, broad
 
   useEffect(() => {
     if (phase !== "countdown") return;
-    if (cdNum <= 0) { setPhase("question"); return; }
+    if (cdNum <= 0) { return; } // stop at "GO!" — SHOW_QUESTION will transition to "question"
     const t = setTimeout(() => setCdNum(n => n - 1), 1000);
     return () => clearTimeout(t);
   }, [phase, cdNum]);
