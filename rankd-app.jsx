@@ -1342,6 +1342,8 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, sessionDbId, broad
 
   useEffect(() => {
     if (!chMsg) return;
+    // Game start: host broadcast — show countdown before first question
+    if (chMsg.type === GM.GAME_START) { setCdNum(3); setPhase("countdown"); }
     if (chMsg.type === GM.SHOW_QUESTION) {
       console.log("[ralli:player] SHOW_QUESTION received — type:", chMsg.question?.type, "options:", chMsg.question?.options, "timeLimit:", chMsg.timeLimit);
       setQuestion(chMsg.question); setTimeLeft(chMsg.timeLimit ?? chMsg.question?.timeLimit ?? 20);
@@ -3818,9 +3820,29 @@ function RankdLobbyScreen({ onNav, pin, playerName, playerEmoji, sessionName, ro
   // Mirrors the admin side so the player sees the same live count.
   useEffect(() => {
     if (role === "admin" || isDemoMode || !sessionDbId) return;
+
+    // Optimistic self-entry: show player count ≥ 1 immediately without waiting
+    // for joinGameSession() (fire-and-forget) or presence subscription to complete.
+    const pidx = Math.abs((playerId ?? "").charCodeAt(0) + ((playerId ?? "").charCodeAt(1) || 0)) % PLAYER_EMOJIS.length;
+    const selfEntry = normParticipant({
+      player_id: currentUser?.id ?? playerId,
+      name:      playerName,
+      emoji:     playerEmoji ?? PLAYER_EMOJIS[pidx],
+      color:     PLAYER_COLORS[pidx % PLAYER_COLORS.length],
+      status:    "active",
+    });
+    setDbPlayers([selfEntry]);
+
+    // Helper: merge DB rows, keeping self if not yet persisted
+    const mergeWithSelf = (rows) => {
+      const selfId   = selfEntry.id;
+      const selfInDb = rows.some(p => p.id === selfId);
+      return selfInDb ? rows : [selfEntry, ...rows];
+    };
+
     // Initial load
     getLobbyParticipants(sessionDbId).then(({ data }) => {
-      if (data) setDbPlayers(data.map(normParticipant));
+      if (data) setDbPlayers(mergeWithSelf(data.map(normParticipant)));
     });
     // Realtime INSERT subscription
     const channel = subscribeToLobbyParticipants(sessionDbId, (row) => {
@@ -3832,7 +3854,7 @@ function RankdLobbyScreen({ onNav, pin, playerName, playerEmoji, sessionName, ro
     // Poll every 3s as fallback
     const interval = setInterval(() => {
       getLobbyParticipants(sessionDbId).then(({ data }) => {
-        if (data) setDbPlayers(data.map(normParticipant));
+        if (data) setDbPlayers(mergeWithSelf(data.map(normParticipant)));
       });
     }, 3000);
     return () => {
@@ -12903,7 +12925,10 @@ export default function App() {
   // User: confirmed name → persist participant to Supabase → go to lobby
   const handleEnterName = (name, emoji) => {
     setLobbyPlayerName(name);
-    if (emoji) setLobbyPlayerEmoji(emoji);
+    // Always compute the same emoji used in DB/presence so My card matches manager view.
+    const pidx       = Math.abs(playerId.charCodeAt(0) + (playerId.charCodeAt(1) || 0)) % PLAYER_EMOJIS.length;
+    const finalEmoji = emoji ?? PLAYER_EMOJIS[pidx];
+    setLobbyPlayerEmoji(finalEmoji);
 
     // Update local session state (keeps existing local-state consumers working)
     setSessions(prev => prev.map(s =>
@@ -12918,9 +12943,8 @@ export default function App() {
     const sessionDbId    = joiningSession?.dbId ?? null;
     console.log("[ralli:game] handleEnterName — name:", name, "lobbyPin:", lobbyPin, "sessionDbId:", sessionDbId, "currentUser:", currentUser?.id, "tenantId:", currentUser?.orgId);
     if (sessionDbId && currentUser) {
-      const pidx  = Math.abs(playerId.charCodeAt(0) + (playerId.charCodeAt(1) || 0)) % PLAYER_EMOJIS.length;
-      const pEmoji = emoji ?? PLAYER_EMOJIS[pidx];
       const pColor = PLAYER_COLORS[pidx % PLAYER_COLORS.length];
+      const pEmoji = finalEmoji;
       joinGameSession(sessionDbId, {
         playerId: currentUser.id ?? playerId,
         name,
