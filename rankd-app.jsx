@@ -890,7 +890,7 @@ const Q_TYPE_ICONS  = { mc: "", tf: "", type: "", open: "", slider: "", pin: "",
 // ── REAL GAME HOST VIEW ──────────────────────────────────────
 const PURPLE = "#8B5CF6";
 
-function KahootHostView({ onNav, sessionName, pin, sessionDbId, tenantId, questions, broadcast, chAnswers, chPlayers, onGameEnd }) {
+function KahootHostView({ onNav, sessionName, pin, sessionDbId, tenantId, questions, broadcast, chAnswers, chPlayers, onGameEnd, setChAnswers }) {
   const [phase,      setPhase]      = useState("countdown");
   const [qIdx,       setQIdx]       = useState(0);
   const [cdNum,      setCdNum]      = useState(3);
@@ -920,7 +920,7 @@ function KahootHostView({ onNav, sessionName, pin, sessionDbId, tenantId, questi
   const timerColor    = timerPct > 50 ? C.green : timerPct > 25 ? C.orange : C.red;
 
   useEffect(() => {
-    if (phase === "countdown" && qIdx === 0) setScores(chPlayers.map(p => ({ ...p, score: 0 })));
+    if (phase === "countdown" && (qIdx === 0 || scores.length === 0)) setScores(chPlayers.map(p => ({ ...p, score: 0 })));
   }, [chPlayers.length]);
 
   useEffect(() => {
@@ -928,7 +928,7 @@ function KahootHostView({ onNav, sessionName, pin, sessionDbId, tenantId, questi
     if (cdNum <= 0) {
       setPhase("question"); setTimeLeft(q.timeLimit);
       persistPhase("question", qIdx, false);
-      broadcast({ type: GM.SHOW_QUESTION, qIdx, question: q, timeLimit: q.timeLimit });
+      broadcast({ type: GM.SHOW_QUESTION, qIdx, question: q, timeLimit: q.timeLimit, questionStartedAt: Date.now() });
       return;
     }
     const t = setTimeout(() => setCdNum(n => n - 1), 1000);
@@ -963,12 +963,13 @@ function KahootHostView({ onNav, sessionName, pin, sessionDbId, tenantId, questi
     setQuestionHistory(h => [...h, { qIdx, q: q?.q, options: q?.options, correct: q?.correct, distribution: qDist, correctCount: qDist[q?.correct]||0, totalAnswers: qTotal, avgTimeMs: qAvgMs }]);
     setPhase("reveal");
     persistPhase("reveal", qIdx, false);
-    const newScores = scores.map(p => {
+    const baseScores = scores.length > 0 ? scores : chPlayers.map(p => ({ ...p, score: 0 }));
+    const newScores = baseScores.map(p => {
       const ans = chAnswers[p.id];
       if (!ans) return { ...p, delta: 0, wasCorrect: false };
       const correct = ans.optionIdx === q.correct;
-      const speedBonus = ans.timeMs ? Math.round((1 - ans.timeMs / (q.timeLimit * 1000)) * 600) : 0;
-      const delta = correct ? Math.max(400, 400 + speedBonus) : 0;
+      const speedBonus = correct && ans.timeMs ? Math.max(0, Math.round((1 - ans.timeMs / (q.timeLimit * 1000)) * 50)) : 0;
+      const delta = correct ? 100 + speedBonus : 0;
       return { ...p, score: p.score + delta, delta, wasCorrect: correct };
     });
     newScores.sort((a, b) => b.score - a.score);
@@ -1002,7 +1003,7 @@ function KahootHostView({ onNav, sessionName, pin, sessionDbId, tenantId, questi
     const newScores = scores.map(p => {
       const respIdx = openResponses.findIndex(r => r.playerId === p.id);
       const grade   = openGrades[respIdx];
-      const delta   = grade === "correct" ? 500 : 0;
+      const delta   = grade === "correct" ? 100 : 0;
       return { ...p, score: p.score + delta, delta, wasCorrect: grade === "correct" };
     });
     newScores.sort((a, b) => b.score - a.score);
@@ -1038,6 +1039,7 @@ function KahootHostView({ onNav, sessionName, pin, sessionDbId, tenantId, questi
       return;
     }
     const next = qIdx + 1;
+    if (setChAnswers) setChAnswers({});
     setQIdx(next); setCdNum(3); setPhase("countdown");
     persistPhase("countdown", next, false);
     broadcast({ type: GM.NEXT_QUESTION, qIdx: next });
@@ -1206,7 +1208,7 @@ function KahootHostView({ onNav, sessionName, pin, sessionDbId, tenantId, questi
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div style={{ textAlign: "right" }}>
             <div style={{ fontSize: 18, fontWeight: 900, color: answeredCount >= playerCount ? "#059669" : C.dark }}>{answeredCount}/{playerCount}</div>
-            <div style={{ fontSize: 10, color: C.textMuted }}>answered</div>
+            <div style={{ fontSize: 10, color: C.textMuted }}>players answered</div>
           </div>
           <div style={{ width: 36, height: 36, borderRadius: "50%", background: timerColor, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, fontSize: 13, color: "#fff", transition: "background 0.3s" }}>{phase === "reveal" ? "✓" : timeLeft}</div>
           {/* Admin controls */}
@@ -1346,7 +1348,9 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, sessionDbId, broad
     if (chMsg.type === GM.GAME_START) { setCdNum(3); setPhase("countdown"); }
     if (chMsg.type === GM.SHOW_QUESTION) {
       console.log("[ralli:player] SHOW_QUESTION received — type:", chMsg.question?.type, "options:", chMsg.question?.options, "timeLimit:", chMsg.timeLimit);
-      setQuestion(chMsg.question); setTimeLeft(chMsg.timeLimit ?? chMsg.question?.timeLimit ?? 20);
+      const timeLimit = chMsg.timeLimit ?? chMsg.question?.timeLimit ?? 20;
+      const elapsed = chMsg.questionStartedAt ? Math.floor((Date.now() - chMsg.questionStartedAt) / 1000) : 0;
+      setQuestion(chMsg.question); setTimeLeft(Math.max(1, timeLimit - elapsed));
       setSelectedIdx(null); setOpenText(""); setOpenSubmitted(false);
       setQStartMs(Date.now()); setPhase("question");
     }
@@ -1714,10 +1718,10 @@ function KahootPlayerView({ onNav, playerName, playerId, pin, sessionDbId, broad
 
 // ── RANKD GAME SCREEN ────────────────────────────────────────
 
-function RankdGameScreen({ onNav, sessionName, role, playerName, questions = GAME_QUESTIONS, demoMode = true, pin, sessionDbId, tenantId, broadcast, chMsg, chAnswers, chPlayers, playerId, onGameEnd }) {
+function RankdGameScreen({ onNav, sessionName, role, playerName, questions = GAME_QUESTIONS, demoMode = true, pin, sessionDbId, tenantId, broadcast, chMsg, chAnswers, chPlayers, playerId, onGameEnd, setChAnswers }) {
   // Real multiplayer mode — route to Kahoot views
   if (!demoMode && role === "admin") {
-    return <KahootHostView onNav={onNav} sessionName={sessionName} pin={pin} sessionDbId={sessionDbId} tenantId={tenantId} questions={questions} broadcast={broadcast} chAnswers={chAnswers} chPlayers={chPlayers} onGameEnd={onGameEnd} />;
+    return <KahootHostView onNav={onNav} sessionName={sessionName} pin={pin} sessionDbId={sessionDbId} tenantId={tenantId} questions={questions} broadcast={broadcast} chAnswers={chAnswers} chPlayers={chPlayers} onGameEnd={onGameEnd} setChAnswers={setChAnswers} />;
   }
   if (!demoMode && role !== "admin") {
     return <KahootPlayerView onNav={onNav} playerName={playerName} playerId={playerId} pin={pin} sessionDbId={sessionDbId} broadcast={broadcast} chMsg={chMsg} />;
@@ -12491,7 +12495,7 @@ export default function App() {
 
   // BroadcastChannel — only active when a game is running
   const isInGame = ["rankd-lobby", "rankd-game"].includes(screen);
-  const { chPlayers, chAnswers, chMsg, broadcast } = useGameChannel(isInGame ? lobbyPin : null, gameRole);
+  const { chPlayers, chAnswers, setChAnswers, chMsg, broadcast } = useGameChannel(isInGame ? lobbyPin : null, gameRole);
 
   if (!currentUser) {
     const handleLogin = (u) => {
@@ -13038,7 +13042,7 @@ export default function App() {
       case "rankd-quiz-builder":return <QuizBuilderScreen onNav={navigate} onSave={handleSaveQuiz} initialQuiz={editingQuiz} onEditQuiz={handleEditQuiz} />;
       case "rankd-name-entry":  return <RankdNameEntryScreen onNav={navigate} pin={lobbyPin} sessionName={lobbySessionName} onConfirm={handleEnterName} defaultName={userProfile.nickname?.trim() || user?.name || ""} defaultAvatar={userProfile.avatarEmoji} />;
       case "rankd-lobby":       return <RankdLobbyScreen onNav={navigate} pin={lobbyPin} playerName={lobbyPlayerName} playerEmoji={lobbyPlayerEmoji} sessionName={lobbySessionName} role={gameRole} sessions={sessions} currentUser={currentUser} onGameStart={handleGameStart} chPlayers={chPlayers} broadcast={broadcast} playerId={playerId} chMsg={chMsg} />;
-      case "rankd-game":        return <RankdGameScreen onNav={navigate} sessionName={lobbySessionName} role={gameRole} playerName={lobbyPlayerName ?? user.name} questions={gameQuestions ?? GAME_QUESTIONS} demoMode={gameRole === "admin" && sessions.find(s => s.code === lobbyPin)?.demoMode !== false} pin={lobbyPin} sessionDbId={sessions.find(s => s.code === lobbyPin)?.dbId ?? null} tenantId={currentOrg?.id ?? user?.orgId ?? null} broadcast={broadcast} chMsg={chMsg} chAnswers={chAnswers} chPlayers={chPlayers} playerId={playerId} onGameEnd={handleGameEnd} />;
+      case "rankd-game":        return <RankdGameScreen onNav={navigate} sessionName={lobbySessionName} role={gameRole} playerName={lobbyPlayerName ?? user.name} questions={gameQuestions ?? GAME_QUESTIONS} demoMode={gameRole === "admin" && sessions.find(s => s.code === lobbyPin)?.demoMode !== false} pin={lobbyPin} sessionDbId={sessions.find(s => s.code === lobbyPin)?.dbId ?? null} tenantId={currentOrg?.id ?? user?.orgId ?? null} broadcast={broadcast} chMsg={chMsg} chAnswers={chAnswers} chPlayers={chPlayers} playerId={playerId} onGameEnd={handleGameEnd} setChAnswers={setChAnswers} />;
       case "rankd-results":     return <RankdResultsScreen onNav={navigate} sessionCode={viewResultsCode} sessions={sessions} gameData={gameResultsData} />;
       case "learn":             return <LearnScreen role={gameRole} user={user} orgUsers={orgUsers} orgs={orgs} onNav={navigate} onAwardXp={handleAwardXp} pendingLessonId={pendingLessonId} onClearPendingLesson={() => setPendingLessonId(null)} canCreate={perm("actions","create")} canEdit={perm("actions","edit")} canDelete={perm("actions","delete")} canAssign={perm("actions","assign")} tenantId={currentOrg?.id ?? null} isReal={!!user?._isReal} />;
       case "quizzes":           return <QuizzesScreen role={gameRole} onNav={navigate} quizzes={quizzes} onEditQuiz={handleEditQuiz} onDeleteQuiz={handleDeleteQuiz} onToggleFavorite={handleToggleFavorite} onToggleActive={handleToggleActive} pendingQuizId={pendingQuizId} onClearPendingQuiz={() => setPendingQuizId(null)} canCreate={perm("actions","create")} canEdit={perm("actions","edit")} canDelete={perm("actions","delete")} canLaunch={perm("actions","launch")} />;
