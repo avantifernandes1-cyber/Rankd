@@ -3746,9 +3746,56 @@ function RankdLobbyScreen({ onNav, pin, playerName, playerEmoji, sessionName, ro
     return () => clearInterval(interval);
   }, [sessionDbId, isDemoMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Player: load participants from DB + subscribe to INSERTs ─────────────────
+  // Mirrors the admin side so the player sees the same live count.
+  useEffect(() => {
+    if (role === "admin" || isDemoMode || !sessionDbId) return;
+    // Initial load
+    getLobbyParticipants(sessionDbId).then(({ data }) => {
+      if (data) setDbPlayers(data.map(normParticipant));
+    });
+    // Realtime INSERT subscription
+    const channel = subscribeToLobbyParticipants(sessionDbId, (row) => {
+      setDbPlayers(prev => {
+        if (prev.some(p => p.id === (row.player_id ?? row.id))) return prev;
+        return [...prev, normParticipant(row)];
+      });
+    });
+    // Poll every 3s as fallback
+    const interval = setInterval(() => {
+      getLobbyParticipants(sessionDbId).then(({ data }) => {
+        if (data) setDbPlayers(data.map(normParticipant));
+      });
+    }, 3000);
+    return () => {
+      supabase.removeChannel(channel);
+      clearInterval(interval);
+    };
+  }, [sessionDbId, isDemoMode, role]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Player: poll game_sessions.phase as countdown/start fallback ─────────────
+  // Broadcast (GM.GAME_START / GM.SHOW_QUESTION) can be missed in race conditions.
+  // If the session phase advances past 'waiting', navigate to game.
+  useEffect(() => {
+    if (role === "admin" || isDemoMode || !sessionDbId) return;
+    const interval = setInterval(() => {
+      supabase
+        .from("game_sessions")
+        .select("phase, status")
+        .eq("id", sessionDbId)
+        .single()
+        .then(({ data }) => {
+          if (!data) return;
+          const started = data.status === "started" || (data.phase && data.phase !== "waiting");
+          if (started) onNav("rankd-game");
+        });
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [sessionDbId, isDemoMode, role]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const basePlayer = role === "admin"
     ? { name: currentUser?.name ?? "Host", emoji: "🦁", color: C.green }
-    : { name: playerName || "You", emoji: "🦊", color: C.orange };
+    : { name: playerName || "You", emoji: playerEmoji ?? "🦊", color: C.orange };
 
   const demoAllPlayers = [basePlayer, ...LOBBY_PLAYERS.filter(p => p.name !== basePlayer.name)];
 
