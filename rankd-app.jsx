@@ -406,7 +406,7 @@ function InfoTooltip({ text }) {
   );
 }
 
-function HomeScreen({ user, onNav, quizAssignments = [], onResumeLesson, onStartQuiz }) {
+function HomeScreen({ user, onNav, quizAssignments = [], onResumeLesson, onStartQuiz, orgUsers = [], isReal = false }) {
   const firstName = user.name.split(" ")[0];
   const hour = new Date().getHours();
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
@@ -605,27 +605,48 @@ function HomeScreen({ user, onNav, quizAssignments = [], onResumeLesson, onStart
         </div>
 
         {/* Leaderboard sidebar */}
-        <Card style={{ padding: 0, overflow: "hidden" }}>
-          <div style={{ padding: "16px 20px", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span style={{ fontSize: 15, fontWeight: 700, color: C.text }}>Leaderboard</span>
-            <span onClick={() => onNav?.("leaderboard")} style={{ fontSize: 12, color: C.orange, fontWeight: 600, cursor: "pointer" }}>Full view</span>
-          </div>
-          <div>
-            {leaderboardData.map(p => ({ ...p, isMe: p.name === user.name })).map((p, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 20px", background: p.isMe ? C.orangeLight : "transparent", borderBottom: i < leaderboardData.length - 1 ? `1px solid ${C.border}` : "none" }}>
-                <div style={{ width: 24, height: 24, borderRadius: "50%", background: p.rank === 1 ? "#F5A623" : p.rank === 2 ? "#A8B2C0" : p.rank === 3 ? "#CD7F32" : C.pageBg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, color: p.rank <= 3 ? "#fff" : C.textSub, flexShrink: 0 }}>{p.rank}</div>
-                <Avatar initials={p.initials} size={32} color={p.color} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: p.isMe ? 700 : 500, color: p.isMe ? C.orange : C.text }}>{p.name}</div>
-                </div>
-                <div style={{ textAlign: "right" }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{p.score}</div>
-                  {p.change !== 0 ? <div style={{ fontSize: 11, fontWeight: 600, color: p.change > 0 ? C.green : C.red }}>{p.change > 0 ? `+${p.change}` : p.change}</div> : <div style={{ fontSize: 11, color: C.textMuted }}>—</div>}
-                </div>
+        {(() => {
+          // For real users: build leaderboard from already-loaded orgUsers (no extra Supabase calls).
+          // For demo users: use the hardcoded mock data.
+          const lbData = isReal
+            ? orgUsers
+                .filter(u => u.orgId === user.orgId)
+                .sort((a, b) => (b.xp ?? 0) - (a.xp ?? 0))
+                .slice(0, 5)
+                .map((u, i) => ({ ...u, rank: i + 1, score: u.xp ?? 0, isMe: u.id === user.id || u.name === user.name, change: 0 }))
+            : leaderboardData.map(p => ({ ...p, isMe: p.name === user.name }));
+          return (
+            <Card style={{ padding: 0, overflow: "hidden" }}>
+              <div style={{ padding: "16px 20px", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: 15, fontWeight: 700, color: C.text }}>Leaderboard</span>
+                <span onClick={() => onNav?.("leaderboard")} style={{ fontSize: 12, color: C.orange, fontWeight: 600, cursor: "pointer" }}>Full view</span>
               </div>
-            ))}
-          </div>
-        </Card>
+              {lbData.length === 0 ? (
+                <div style={{ padding: "32px 20px", textAlign: "center" }}>
+                  <div style={{ fontSize: 24, marginBottom: 10 }}>🏆</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 4 }}>No rankings yet</div>
+                  <div style={{ fontSize: 12, color: C.textSub, lineHeight: 1.6 }}>Rankings appear once your team completes training.</div>
+                </div>
+              ) : (
+                <div>
+                  {lbData.map((p, i) => (
+                    <div key={p.id ?? i} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 20px", background: p.isMe ? C.orangeLight : "transparent", borderBottom: i < lbData.length - 1 ? `1px solid ${C.border}` : "none" }}>
+                      <div style={{ width: 24, height: 24, borderRadius: "50%", background: p.rank === 1 ? "#F5A623" : p.rank === 2 ? "#A8B2C0" : p.rank === 3 ? "#CD7F32" : C.pageBg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, color: p.rank <= 3 ? "#fff" : C.textSub, flexShrink: 0 }}>{p.rank}</div>
+                      <Avatar initials={p.initials} size={32} color={p.color} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: p.isMe ? 700 : 500, color: p.isMe ? C.orange : C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{p.score.toLocaleString()}</div>
+                        {p.change !== 0 ? <div style={{ fontSize: 11, fontWeight: 600, color: p.change > 0 ? C.green : C.red }}>{p.change > 0 ? `+${p.change}` : p.change}</div> : <div style={{ fontSize: 11, color: C.textMuted }}>—</div>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          );
+        })()}
       </div>
 
       {/* Tasks Panel — overlay modal */}
@@ -13049,7 +13070,7 @@ export default function App() {
       }} />;
       case "home":              return isOrgAdmin
         ? <LeadershipDashboardScreen currentOrg={currentOrg} orgUsers={orgUsers} isReal={!!user?._isReal} />
-        : <HomeScreen user={user} onNav={navigate} quizAssignments={USER_QUIZ_ASSIGNMENTS_SEED} onResumeLesson={(id) => { setPendingLessonId(id); navigate("learn"); }} onStartQuiz={(id) => { setPendingQuizId(id); navigate("quizzes"); }} />;
+        : <HomeScreen user={user} onNav={navigate} quizAssignments={user?._isReal ? [] : USER_QUIZ_ASSIGNMENTS_SEED} onResumeLesson={(id) => { setPendingLessonId(id); navigate("learn"); }} onStartQuiz={(id) => { setPendingQuizId(id); navigate("quizzes"); }} orgUsers={orgUsers} isReal={!!user?._isReal} />;
       case "rankd":             return <RankdScreen onNav={navigate} onJoin={handleEnterPin} sessions={sessions} onLaunch={handleLaunch} onViewResults={handleViewResults} onRelaunch={handleRelaunch} role={gameRole} currentUser={currentUser} />;
       case "rankd-new":         return <NewSessionScreen onNav={navigate} quizzes={quizzes} onCreateSession={handleCreateSession} />;
       case "rankd-quiz-builder":return <QuizBuilderScreen onNav={navigate} onSave={handleSaveQuiz} initialQuiz={editingQuiz} onEditQuiz={handleEditQuiz} />;
