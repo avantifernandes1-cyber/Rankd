@@ -44,6 +44,12 @@ import {
   getTenantAssignments,
   createAssignment as dbCreateAssignment,
   deleteAssignment as dbDeleteAssignment,
+  archiveCourse as archiveCourseService,
+  archiveLesson as archiveLessonService,
+  restoreCourse as restoreCourseService,
+  restoreLesson as restoreLessonService,
+  getArchivedContent,
+  getTenantLessonCompletions,
 } from "./src/lib/contentService.js";
 import { getProfile, createMissingProfile, getTenantProfiles } from "./src/lib/profileService.js";
 import { sendInviteEmail } from "./src/lib/emailService.js";
@@ -326,9 +332,9 @@ function ProgressBar({ value, max = 100, color = C.orange, height = 6, trackColo
   );
 }
 
-function Card({ children, style = {} }) {
+function Card({ children, style = {}, onClick }) {
   return (
-    <div style={{
+    <div onClick={onClick} style={{
       background: C.white, borderRadius: 12,
       border: `1px solid ${C.border}`,
       padding: 20, ...style,
@@ -5401,6 +5407,9 @@ function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, p
   });
   const [userTab,    setUserTab]    = useState("assigned");
   const [search,     setSearch]     = useState("");
+  const [archivedCourses,   setArchivedCourses]   = useState([]);
+  const [archivedLessons,   setArchivedLessons]   = useState([]);
+  const [tenantCompletions, setTenantCompletions] = useState([]); // manager/admin only
 
   // ── Load content from Supabase for real users ────────────────────────────
   useEffect(() => {
@@ -5415,6 +5424,15 @@ function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, p
       setLessons(dbLessons ?? []);
       setAssignments(dbAssignments ?? []);
     });
+    // Load archived content and all tenant completions for manager view
+    if (isAdmin) {
+      getArchivedContent(tenantId).then(({ data }) => {
+        if (data) { setArchivedCourses(data.courses ?? []); setArchivedLessons(data.lessons ?? []); }
+      });
+      getTenantLessonCompletions(tenantId).then(({ data }) => {
+        if (data) setTenantCompletions(data);
+      });
+    }
   }, [tenantId, isReal]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Load lesson completions from Supabase for real users ─────────────────
@@ -5470,6 +5488,51 @@ function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, p
       onClearPendingLesson?.();
     }
   }, [pendingLessonId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── ARCHIVE / RESTORE HANDLERS (admin view) ──────────────
+  const handleArchiveCourse = async (courseId) => {
+    const course = courses.find(c => c.id === courseId);
+    if (!course) return;
+    setCourses(prev => prev.filter(c => c.id !== courseId));
+    setArchivedCourses(prev => [{ ...course, status: "archived" }, ...prev]);
+    if (isReal) {
+      const { error } = await archiveCourseService(courseId);
+      if (error) console.error("[ralli] archiveCourse failed:", error);
+    }
+  };
+
+  const handleArchiveLesson = async (lessonId) => {
+    const lesson = lessons.find(l => l.id === lessonId);
+    if (!lesson) return;
+    setLessons(prev => prev.filter(l => l.id !== lessonId));
+    setArchivedLessons(prev => [{ ...lesson, status: "archived" }, ...prev]);
+    if (isReal) {
+      const { error } = await archiveLessonService(lessonId);
+      if (error) console.error("[ralli] archiveLesson failed:", error);
+    }
+  };
+
+  const handleRestoreCourse = async (courseId) => {
+    const course = archivedCourses.find(c => c.id === courseId);
+    if (!course) return;
+    setArchivedCourses(prev => prev.filter(c => c.id !== courseId));
+    setCourses(prev => [{ ...course, status: "active" }, ...prev]);
+    if (isReal) {
+      const { error } = await restoreCourseService(courseId);
+      if (error) console.error("[ralli] restoreCourse failed:", error);
+    }
+  };
+
+  const handleRestoreLesson = async (lessonId) => {
+    const lesson = archivedLessons.find(l => l.id === lessonId);
+    if (!lesson) return;
+    setArchivedLessons(prev => prev.filter(l => l.id !== lessonId));
+    setLessons(prev => [{ ...lesson, status: "active" }, ...prev]);
+    if (isReal) {
+      const { error } = await restoreLessonService(lessonId);
+      if (error) console.error("[ralli] restoreLesson failed:", error);
+    }
+  };
 
   // ── USER VIEW ─────────────────────────────────────────────
   if (!isAdmin) {
@@ -5766,8 +5829,8 @@ function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, p
 
   // ── ADMIN VIEW ────────────────────────────────────────────
   const sq = search.toLowerCase();
-  const filteredCourses = courses.filter(c => !sq || c.title.toLowerCase().includes(sq) || c.description.toLowerCase().includes(sq));
-  const filteredLessons = lessons.filter(l => !sq || l.title.toLowerCase().includes(sq) || l.description.toLowerCase().includes(sq));
+  const filteredCourses = courses.filter(c => c.status !== "archived" && (!sq || c.title.toLowerCase().includes(sq) || c.description.toLowerCase().includes(sq)));
+  const filteredLessons = lessons.filter(l => l.status !== "archived" && (!sq || l.title.toLowerCase().includes(sq) || l.description.toLowerCase().includes(sq)));
   const filteredAssign  = assignments.filter(a => {
     if (!sq) return true;
     const content = a.contentType === "course" ? courses.find(c => c.id === a.contentId) : lessons.find(l => l.id === a.contentId);
@@ -5777,7 +5840,8 @@ function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, p
   const TABS = [
     { id: "courses",     label: "Courses",     count: filteredCourses.length },
     { id: "lessons",     label: "Lessons",     count: filteredLessons.length },
-    { id: "assignments", label: "Assignments", count: filteredAssign.length },
+    { id: "assignments", label: "Assignments", count: assignments.length },
+    { id: "archived",    label: "Archived",    count: archivedCourses.length + archivedLessons.length },
   ];
 
   const getAssignedLabel = (a) => {
@@ -5855,9 +5919,10 @@ function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, p
                 <div style={{ padding: 20 }}>
                   <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 12 }}>
                     <div style={{ fontSize: 32 }}>{course.emoji}</div>
-                    <div style={{ display: "flex", gap: 6 }}>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
                       {canEdit && <button onClick={() => setCourseModal(course)} style={{ padding: "5px 10px", borderRadius: 7, border: `1px solid ${C.border}`, background: C.white, color: C.textSub, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Edit</button>}
                       {canAssign && <button onClick={() => setAssignModal({ contentType: "course", contentId: course.id })} style={{ padding: "5px 10px", borderRadius: 7, border: "none", background: C.orange, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Assign</button>}
+                      {canEdit && <button onClick={() => handleArchiveCourse(course.id)} style={{ padding: "5px 10px", borderRadius: 7, border: `1px solid rgba(239,68,68,0.25)`, background: "transparent", color: C.red, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Archive</button>}
                     </div>
                   </div>
                   <h3 style={{ margin: "0 0 6px", fontSize: 16, fontWeight: 800, color: C.text }}>{course.title}</h3>
@@ -5910,9 +5975,10 @@ function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, p
                 }}>
                   {LESSON_TYPE_ICONS[lesson.type]}
                 </div>
-                <div style={{ display: "flex", gap: 5 }}>
+                <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
                   {canEdit && <button onClick={() => setLessonModal(lesson)} style={{ padding: "4px 9px", borderRadius: 7, border: `1px solid ${C.border}`, background: C.white, color: C.textSub, fontSize: 11, fontWeight: 600, cursor: "pointer" }}>Edit</button>}
                   {canAssign && <button onClick={() => setAssignModal({ contentType: "lesson", contentId: lesson.id })} style={{ padding: "4px 9px", borderRadius: 7, border: "none", background: C.orange, color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>Assign</button>}
+                  {canEdit && <button onClick={() => handleArchiveLesson(lesson.id)} style={{ padding: "4px 9px", borderRadius: 7, border: `1px solid rgba(239,68,68,0.25)`, background: "transparent", color: C.red, fontSize: 11, fontWeight: 600, cursor: "pointer" }}>Archive</button>}
                 </div>
               </div>
               <div style={{ fontSize: 11, fontWeight: 700, color: LESSON_TYPE_COLORS[lesson.type], letterSpacing: "0.06em", marginBottom: 4 }}>
@@ -5939,53 +6005,176 @@ function LearnScreen({ role, user, orgUsers = [], orgs = [], onNav, onAwardXp, p
         </div>
       )}
 
-      {/* ASSIGNMENTS TAB */}
-      {tab === "assignments" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {filteredAssign.length === 0 && (
+      {/* ASSIGNMENTS TAB — manager assignment portal */}
+      {tab === "assignments" && (() => {
+        const STATUS_CONFIG = {
+          not_started: { label: "Not Started", bg: C.muted,    text: C.textSub  },
+          in_progress: { label: "In Progress", bg: C.blueBg,   text: C.blue     },
+          completed:   { label: "Completed",   bg: C.greenBg,  text: C.green    },
+          overdue:     { label: "Overdue",     bg: C.redBg,    text: C.red      },
+        };
+
+        // Expand assignments into per-rep rows
+        const allRows = assignments.flatMap(a => {
+          const isCourse = a.contentType === "course";
+          const content  = isCourse ? courses.find(c => c.id === a.contentId) : lessons.find(l => l.id === a.contentId);
+          if (!content) return [];
+
+          let users = [];
+          if (a.assignedTo?.type === "individual") {
+            const u = orgUsers.find(u => u.id === a.assignedTo.userId);
+            if (u) users = [u];
+            else if (a.assignedTo.userName) users = [{ id: a.assignedTo.userId ?? "__ind__", name: a.assignedTo.userName, initials: (a.assignedTo.userName[0] ?? "?").toUpperCase(), color: C.orange }];
+          } else if (a.assignedTo?.type === "group") {
+            users = orgUsers.filter(u => u.role !== "ralli_admin" && u.role !== "superadmin" && u.role !== "orgAdmin");
+            if (!users.length) users = [{ id: "__group__", name: "All users", initials: "ALL", color: C.blue }];
+          } else if (a.assignedTo?.type === "team") {
+            users = a.assignedTo.teamId ? orgUsers.filter(u => u.teamId === a.assignedTo.teamId) : [];
+            if (!users.length) users = [{ id: "__team__", name: a.assignedTo.teamName ?? "Team", initials: "T", color: C.purple, _isAggregate: true }];
+          }
+
+          return users.map(u => {
+            const userComps = tenantCompletions.filter(c => c.profileId === u.id);
+            let progress = 0, completedAt = null, status = "not_started";
+
+            if (!u._isAggregate) {
+              if (isCourse) {
+                const cls = (content.lessonIds ?? []).map(id => lessons.find(l => l.id === id)).filter(Boolean);
+                const done = cls.filter(l => userComps.some(c => c.lessonId === l.id));
+                progress = cls.length ? Math.round((done.length / cls.length) * 100) : 0;
+                if (progress === 100) {
+                  status = "completed";
+                  const dates = done.map(l => userComps.find(c => c.lessonId === l.id)?.completedAt).filter(Boolean).sort();
+                  completedAt = dates[dates.length - 1] ?? null;
+                } else if (progress > 0) { status = "in_progress"; }
+              } else {
+                const comp = userComps.find(c => c.lessonId === a.contentId);
+                if (comp) { progress = 100; status = "completed"; completedAt = comp.completedAt; }
+              }
+              if (status !== "completed" && a.dueAt && a.dueAt !== "Open") {
+                const d = new Date(a.dueAt);
+                if (!isNaN(d) && d < new Date()) status = "overdue";
+              }
+            }
+
+            return { a, content, isCourse, u, progress, status, completedAt };
+          });
+        });
+
+        const searchedRows = sq
+          ? allRows.filter(r => r.content?.title.toLowerCase().includes(sq) || r.u?.name?.toLowerCase().includes(sq))
+          : allRows;
+
+        if (searchedRows.length === 0) {
+          return (
             <div style={{ padding: 60, textAlign: "center", background: C.white, borderRadius: 12, border: `1px solid ${C.border}` }}>
+              <div style={{ fontSize: 32, marginBottom: 12 }}>📋</div>
               <p style={{ margin: 0, fontSize: 15, fontWeight: 700, color: C.text }}>No assignments yet</p>
-              <p style={{ margin: "6px 0 0", fontSize: 13, color: C.textSub }}>Use the "Assign" button on a course or lesson to get started</p>
+              <p style={{ margin: "6px 0 0", fontSize: 13, color: C.textSub }}>Use the "Assign" button on a course or lesson to assign content to your reps</p>
+            </div>
+          );
+        }
+
+        return (
+          <div>
+            <p style={{ margin: "0 0 14px", fontSize: 13, color: C.textSub }}>{searchedRows.length} rep assignment{searchedRows.length !== 1 ? "s" : ""}</p>
+            <div style={{ borderRadius: 12, overflow: "hidden", border: `1px solid ${C.border}` }}>
+              {/* Header */}
+              <div style={{ display: "grid", gridTemplateColumns: "2fr 1.2fr 0.8fr 1fr 0.8fr 80px", gap: 10, padding: "10px 16px", background: C.pageBg, fontSize: 11, fontWeight: 700, color: C.textMuted, letterSpacing: "0.05em" }}>
+                <span>CONTENT</span><span>REP</span><span>DUE DATE</span><span>STATUS</span><span>PROGRESS</span><span>DONE</span>
+              </div>
+              {searchedRows.map(({ a, content, isCourse, u, progress, status, completedAt }, i) => {
+                const sc  = STATUS_CONFIG[status] ?? STATUS_CONFIG.not_started;
+                const tColor = isCourse ? (content.color ?? C.orange) : (LESSON_TYPE_COLORS[content.type] ?? C.orange);
+                const dueLabel = a.dueAt && a.dueAt !== "Open"
+                  ? (() => { try { return new Date(a.dueAt).toLocaleDateString("en-US", { month: "short", day: "numeric" }); } catch { return a.dueAt; } })()
+                  : "Open";
+                return (
+                  <div key={`${a.id}-${u.id}-${i}`} style={{ display: "grid", gridTemplateColumns: "2fr 1.2fr 0.8fr 1fr 0.8fr 80px", gap: 10, padding: "13px 16px", background: C.white, borderTop: `1px solid ${C.border}`, alignItems: "center" }}>
+                    {/* Content */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+                      <div style={{ width: 30, height: 30, borderRadius: 7, background: tColor + "20", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13 }}>
+                        {isCourse ? content.emoji : LESSON_TYPE_ICONS[content.type]}
+                      </div>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{content.title}</div>
+                        <div style={{ fontSize: 11, color: C.textSub }}>{isCourse ? "Course" : "Lesson"}{a.required ? " · Required" : ""}</div>
+                      </div>
+                    </div>
+                    {/* Rep */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+                      <div style={{ width: 24, height: 24, borderRadius: "50%", background: u.color ?? C.orange, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#fff", flexShrink: 0 }}>
+                        {(u.initials ?? u.name?.[0] ?? "?").toUpperCase()}
+                      </div>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.name}</span>
+                    </div>
+                    {/* Due */}
+                    <span style={{ fontSize: 13, color: status === "overdue" ? C.red : C.textSub, fontWeight: status === "overdue" ? 700 : 400 }}>{dueLabel}</span>
+                    {/* Status badge */}
+                    <div><span style={{ fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 6, background: sc.bg, color: sc.text }}>{sc.label}</span></div>
+                    {/* Progress bar */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                      <div style={{ flex: 1, height: 5, background: C.muted, borderRadius: 3, overflow: "hidden" }}>
+                        <div style={{ height: "100%", width: `${progress}%`, background: status === "completed" ? C.green : status === "overdue" ? C.red : C.orange, borderRadius: 3 }} />
+                      </div>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: C.textSub, flexShrink: 0 }}>{progress}%</span>
+                    </div>
+                    {/* Completed at */}
+                    <span style={{ fontSize: 12, color: C.textSub }}>
+                      {completedAt ? (() => { try { return new Date(completedAt).toLocaleDateString("en-US", { month: "short", day: "numeric" }); } catch { return "—"; } })() : "—"}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ARCHIVED TAB */}
+      {tab === "archived" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+          {archivedCourses.length === 0 && archivedLessons.length === 0 && (
+            <div style={{ padding: 60, textAlign: "center", background: C.white, borderRadius: 12, border: `1px solid ${C.border}` }}>
+              <div style={{ fontSize: 32, marginBottom: 12 }}>📦</div>
+              <p style={{ margin: 0, fontSize: 15, fontWeight: 700, color: C.text }}>Nothing archived</p>
+              <p style={{ margin: "6px 0 0", fontSize: 13, color: C.textSub }}>Archived courses and lessons will appear here. Use the Archive button on any course or lesson to move it here.</p>
             </div>
           )}
-          {filteredAssign.map(a => {
-            const isCourse = a.contentType === "course";
-            const content  = isCourse ? courses.find(c => c.id === a.contentId) : lessons.find(l => l.id === a.contentId);
-            if (!content) return null;
-            return (
-              <Card key={a.id} style={{ display: "flex", alignItems: "center", gap: 16 }}>
-                <div style={{
-                  width: 44, height: 44, borderRadius: 10, flexShrink: 0,
-                  background: (isCourse ? content.color : LESSON_TYPE_COLORS[content.type]) + "20",
-                  display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22,
-                }}>
-                  {isCourse ? content.emoji : LESSON_TYPE_ICONS[content.type]}
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
-                    <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", color: C.textMuted }}>
-                      {isCourse ? "COURSE" : "LESSON"}
-                    </span>
-                    {a.required && <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 4, background: C.redBg, color: C.red }}>REQUIRED</span>}
-                    {!a.required && <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 4, background: C.blueBg, color: C.blue }}>RECOMMENDED</span>}
-                  </div>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{content.title}</div>
-                  <div style={{ fontSize: 12, color: C.textSub, marginTop: 2 }}>
-                    {getAssignedLabel(a)} · Assigned {a.assignedAt} · Due {a.dueAt}
-                  </div>
-                </div>
-                <button onClick={() => {
-                  setAssignments(prev => prev.filter(x => x.id !== a.id));
-                  if (isReal && a.id && !a.id.startsWith("a")) {
-                    dbDeleteAssignment(a.id).then(({ error }) => { if (error) console.error("[ralli] deleteAssignment failed:", error); });
-                  }
-                }} style={{
-                  padding: "6px 12px", borderRadius: 7, border: `1px solid rgba(239,68,68,0.3)`,
-                  background: "rgba(239,68,68,0.06)", color: C.red, fontSize: 12, fontWeight: 600, cursor: "pointer", flexShrink: 0,
-                }}>Remove</button>
-              </Card>
-            );
-          })}
+          {archivedCourses.length > 0 && (
+            <div>
+              <h3 style={{ margin: "0 0 10px", fontSize: 12, fontWeight: 800, color: C.textMuted, letterSpacing: "0.06em" }}>COURSES ({archivedCourses.length})</h3>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {archivedCourses.map(c => (
+                  <Card key={c.id} style={{ display: "flex", alignItems: "center", gap: 14, opacity: 0.72 }}>
+                    <div style={{ width: 36, height: 36, borderRadius: 8, background: (c.color ?? C.orange) + "20", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>{c.emoji}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{c.title}</div>
+                      <div style={{ fontSize: 11, color: C.textSub }}>Course · {c.lessonIds?.length ?? 0} lessons</div>
+                    </div>
+                    <button onClick={() => handleRestoreCourse(c.id)} style={{ padding: "6px 14px", borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.textSub, fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>Restore</button>
+                  </Card>
+                ))}
+              </div>
+            </div>
+          )}
+          {archivedLessons.length > 0 && (
+            <div>
+              <h3 style={{ margin: "0 0 10px", fontSize: 12, fontWeight: 800, color: C.textMuted, letterSpacing: "0.06em" }}>LESSONS ({archivedLessons.length})</h3>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {archivedLessons.map(l => (
+                  <Card key={l.id} style={{ display: "flex", alignItems: "center", gap: 14, opacity: 0.72 }}>
+                    <div style={{ width: 36, height: 36, borderRadius: 8, background: (LESSON_TYPE_COLORS[l.type] ?? C.orange) + "20", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>{LESSON_TYPE_ICONS[l.type]}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{l.title}</div>
+                      <div style={{ fontSize: 11, color: C.textSub }}>{(l.type ?? "").toUpperCase()} · {l.duration}</div>
+                    </div>
+                    <button onClick={() => handleRestoreLesson(l.id)} style={{ padding: "6px 14px", borderRadius: 8, border: `1px solid ${C.border}`, background: C.white, color: C.textSub, fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>Restore</button>
+                  </Card>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -12641,6 +12830,7 @@ export default function App() {
           initials: (m.name ?? m.email ?? "U").split(" ").map(p => p[0] ?? "").join("").toUpperCase().slice(0, 2) || "U",
           role: m.role ?? "user",
           orgId: m.tenant_id,
+          teamId: m.team_id ?? null,
           color: m.color ?? "#F97316",
           xp: m.xp ?? 0,
           streak: m.streak ?? 0,

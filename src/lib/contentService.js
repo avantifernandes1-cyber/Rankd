@@ -370,6 +370,113 @@ export async function deleteAssignment(assignmentId) {
 
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ARCHIVE / RESTORE
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Soft-archive a course (sets status = 'archived').
+ * @param {string} courseId
+ * @returns {Promise<{ error: Object|null }>}
+ */
+export async function archiveCourse(courseId) {
+  const { error } = await supabase
+    .from("tenant_courses")
+    .update({ status: "archived", updated_at: new Date().toISOString() })
+    .eq("id", courseId);
+  return { error };
+}
+
+/**
+ * Soft-archive a lesson (sets status = 'archived').
+ * @param {string} lessonId
+ * @returns {Promise<{ error: Object|null }>}
+ */
+export async function archiveLesson(lessonId) {
+  const { error } = await supabase
+    .from("tenant_lessons")
+    .update({ status: "archived", updated_at: new Date().toISOString() })
+    .eq("id", lessonId);
+  return { error };
+}
+
+/**
+ * Restore a course from archive (sets status = 'active').
+ * @param {string} courseId
+ * @returns {Promise<{ error: Object|null }>}
+ */
+export async function restoreCourse(courseId) {
+  const { error } = await supabase
+    .from("tenant_courses")
+    .update({ status: "active", updated_at: new Date().toISOString() })
+    .eq("id", courseId);
+  return { error };
+}
+
+/**
+ * Restore a lesson from archive (sets status = 'active').
+ * @param {string} lessonId
+ * @returns {Promise<{ error: Object|null }>}
+ */
+export async function restoreLesson(lessonId) {
+  const { error } = await supabase
+    .from("tenant_lessons")
+    .update({ status: "active", updated_at: new Date().toISOString() })
+    .eq("id", lessonId);
+  return { error };
+}
+
+/**
+ * Fetch all archived courses and lessons for a tenant.
+ * Used by the manager Archived tab.
+ * @param {string} tenantId
+ * @returns {Promise<{ data: { courses: Object[], lessons: Object[] }|null, error: Object|null }>}
+ */
+export async function getArchivedContent(tenantId) {
+  const [{ data: archivedCourses, error: ce }, { data: archivedLessons, error: le }] = await Promise.all([
+    supabase
+      .from("tenant_courses")
+      .select("*")
+      .eq("tenant_id", tenantId)
+      .eq("status", "archived")
+      .order("updated_at", { ascending: false }),
+    supabase
+      .from("tenant_lessons")
+      .select("*")
+      .eq("tenant_id", tenantId)
+      .eq("status", "archived")
+      .order("updated_at", { ascending: false }),
+  ]);
+  return {
+    data: {
+      courses: archivedCourses ? archivedCourses.map(dbToCourse) : [],
+      lessons: archivedLessons ? archivedLessons.map(dbToLesson) : [],
+    },
+    error: ce ?? le ?? null,
+  };
+}
+
+/**
+ * Fetch all lesson completions for a tenant's users.
+ * Used by the manager Assignments tab to show per-rep completion status.
+ * Managers and orgAdmins can read all rows (RLS policy on lesson_completions allows this).
+ * @param {string} tenantId
+ * @returns {Promise<{ data: Array<{ profileId: string, lessonId: string, completedAt: string }>|null, error: Object|null }>}
+ */
+export async function getTenantLessonCompletions(tenantId) {
+  const { data, error } = await supabase
+    .from("lesson_completions")
+    .select("profile_id, lesson_id, completed_at")
+    .eq("tenant_id", tenantId);
+  return {
+    data: data
+      ? data.map(r => ({ profileId: r.profile_id, lessonId: r.lesson_id, completedAt: r.completed_at }))
+      : null,
+    error,
+  };
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
 // LESSON COMPLETIONS
 // ─────────────────────────────────────────────────────────────────────────────
 
